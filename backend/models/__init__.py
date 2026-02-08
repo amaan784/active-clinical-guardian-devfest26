@@ -1,5 +1,5 @@
 """
-Synapse 2.0 Data Models
+The Active Clinical Guardian - Data Models
 """
 
 from .schemas import (

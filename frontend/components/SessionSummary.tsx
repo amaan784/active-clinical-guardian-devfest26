@@ -169,7 +169,7 @@ export function SessionSummary({ data, onClose }: SessionSummaryProps) {
                   const url = URL.createObjectURL(blob)
                   const a = document.createElement("a")
                   a.href = url
-                  a.download = `synapse-note-${data.session_id.slice(0, 8)}.json`
+                  a.download = `clinical-note-${data.session_id.slice(0, 8)}.json`
                   a.click()
                   URL.revokeObjectURL(url)
                 }}

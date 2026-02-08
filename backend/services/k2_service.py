@@ -1,5 +1,5 @@
 """
-Synapse 2.0 K2 Think Safety Service
+The Active Clinical Guardian - K2 Think Safety Service
 System 2 reasoning for drug interaction validation using K2-Think-V2
 
 K2 Think is accessed via OpenAI-compatible API hosted at api.k2think.ai

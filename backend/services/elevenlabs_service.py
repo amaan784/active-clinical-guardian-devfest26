@@ -1,5 +1,5 @@
 """
-Synapse 2.0 ElevenLabs Service
+The Active Clinical Guardian - ElevenLabs Service
 Voice I/O for transcription and text-to-speech interruptions
 """
 

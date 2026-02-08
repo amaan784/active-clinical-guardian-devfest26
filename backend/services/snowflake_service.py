@@ -1,5 +1,5 @@
 """
-Synapse 2.0 Snowflake Cortex Service
+The Active Clinical Guardian - Snowflake Cortex Service
 Patient data retrieval and RAG queries using Snowflake Cortex AI functions
 
 References:

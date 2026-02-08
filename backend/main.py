@@ -1,5 +1,5 @@
 """
-Synapse 2.0 - The Active Clinical Guardian
+The Active Clinical Guardian
 Main FastAPI Application
 
 This is the central orchestrator that manages:
@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI):
     global snowflake_service, k2_service, elevenlabs_service, dedalus_service, flowglad_service
 
     # Startup
-    logger.info("Initializing Synapse 2.0 services...")
+    logger.info("Initializing services...")
 
     snowflake_service = SnowflakeService()
     await snowflake_service.connect()
@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
-    logger.info("Shutting down Synapse 2.0...")
+    logger.info("Shutting down...")
 
     if snowflake_service:
         await snowflake_service.disconnect()
@@ -92,8 +92,8 @@ async def lifespan(app: FastAPI):
 
 # Create FastAPI app
 app = FastAPI(
-    title="Synapse 2.0",
-    description="The Active Clinical Guardian - Real-time clinical safety monitoring",
+    title="The Active Clinical Guardian",
+    description="Real-time clinical safety monitoring",
     version="2.0.0",
     lifespan=lifespan,
 )
@@ -192,7 +192,7 @@ async def orchestrate_safety_check(
 async def root():
     """Health check endpoint"""
     return {
-        "service": "Synapse 2.0",
+        "service": "The Active Clinical Guardian",
         "status": "operational",
         "version": "2.0.0",
         "timestamp": datetime.now().isoformat(),

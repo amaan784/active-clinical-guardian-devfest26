@@ -1,5 +1,5 @@
 """
-Synapse 2.0 Flowglad Service
+The Active Clinical Guardian - Flowglad Service
 Automated billing and CPT code generation
 
 Reference: https://docs.flowglad.com/quickstart

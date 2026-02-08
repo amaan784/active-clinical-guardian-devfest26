@@ -298,9 +298,9 @@ export default function Home() {
                 <Activity className="h-6 w-6 text-primary-foreground" />
               </div>
               <div>
-                <h1 className="text-xl font-bold">Synapse 2.0</h1>
+                <h1 className="text-xl font-bold">The Active Clinical Guardian</h1>
                 <p className="text-sm text-muted-foreground">
-                  The Active Clinical Guardian
+                  Real-time Clinical Safety Monitoring
                 </p>
               </div>
             </div>

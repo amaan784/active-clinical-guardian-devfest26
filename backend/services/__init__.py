@@ -1,5 +1,5 @@
 """
-Synapse 2.0 Services
+The Active Clinical Guardian - Services
 Integration modules for external APIs
 """
 

@@ -1,4 +1,4 @@
-# Synapse 2.0 - The Active Clinical Guardian
+# The Active Clinical Guardian
 
 Real-time clinical safety monitoring system that listens to doctor-patient encounters, validates drug safety using AI reasoning, and interrupts via voice when dangerous conditions are detected.
 
@@ -121,13 +121,13 @@ K2_MODEL=LLM360/K2-Think-V2
 
 Without K2 Think, the system falls back to rule-based drug interaction checking.
 
-## Demo Flow
+## Usage Flow
 
-1. **Select Patient**: Choose a demo patient (e.g., "Amaan Patel" with SSRI history)
+1. **Select Patient**: Choose a patient from the list (loaded from Snowflake)
 2. **Start Consultation**: Begin the clinical encounter
 3. **Speak/Type**: Use microphone or type transcript manually
-4. **Trigger Alert**: Click "Demo: Trigger Alert" or mention "sumatriptan"
-5. **See Interruption**: Watch the system detect the SSRI-Triptan interaction
+4. **Safety Detection**: Mention a drug like "sumatriptan" or "penicillin" — the system checks for interactions and allergies in real-time
+5. **See Interruption**: If a danger is detected, the system interrupts with a voice warning and red alert
 6. **End Consultation**: Generate SOAP note and billing
 
 ## API Endpoints
@@ -139,8 +139,8 @@ Without K2 Think, the system falls back to rule-based drug interaction checking.
 | `/api/consult/start` | POST | Start a new consultation |
 | `/api/consult/{id}/end` | POST | End consultation and generate billing |
 | `/api/consult/{id}/status` | GET | Get session status |
+| `/api/patients` | GET | List all patients |
 | `/api/patients/{id}` | GET | Get patient data |
-| `/api/demo/simulate-danger` | POST | Trigger a safety alert (demo) |
 
 ### WebSocket
 
@@ -198,6 +198,9 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 ```bash
 vercel deploy
 ```
+
+### Tests
+Go inside the `backend/tests` folder and run the tests — they contain individual files for testing each service connection.
 
 ## Prize Targeting
 

@@ -1,5 +1,5 @@
 """
-Synapse 2.0 Configuration
+The Active Clinical Guardian - Configuration
 Central configuration management using Pydantic Settings
 """
 
