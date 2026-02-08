@@ -57,7 +57,7 @@ class DedalusService:
         self._client: Optional[AsyncDedalus] = None
         self._runner: Optional[DedalusRunner] = None
         # Strong default model for clinical reasoning
-        self.model = "anthropic/claude-3-5-sonnet-20240620" 
+        self.model = "openai/gpt-4o"
 
     async def initialize(self) -> bool:
         """Initialize Dedalus client with Auth support"""
