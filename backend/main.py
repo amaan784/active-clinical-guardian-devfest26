@@ -432,8 +432,11 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
         })
 
         # Generate and stream interruption audio
-        async for audio_chunk in elevenlabs_service.speak_interruption(warning_text):
-            await websocket.send_bytes(audio_chunk)
+        try:
+            async for audio_chunk in elevenlabs_service.speak_interruption(warning_text):
+                await websocket.send_bytes(audio_chunk)
+        except Exception as e:
+            logger.error(f"TTS streaming in interruption failed (non-fatal): {e}")
 
         await websocket.send_json({
             "type": "interruption_end",

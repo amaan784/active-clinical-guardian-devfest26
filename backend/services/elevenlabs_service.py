@@ -8,6 +8,7 @@ import asyncio
 import base64
 from typing import Optional, Callable, AsyncGenerator
 import json
+import io
 
 from config import get_settings
 
@@ -15,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 # Conditional imports
 try:
-    from elevenlabs import ElevenLabs
-    from elevenlabs.core import ApiError
+    from elevenlabs.client import ElevenLabs
+    from elevenlabs.realtime_speech_to_text import RealtimeSpeechToText
     ELEVENLABS_AVAILABLE = True
 except ImportError:
     ELEVENLABS_AVAILABLE = False
@@ -92,19 +93,24 @@ class ElevenLabsService:
             # Mock transcription for demo
             logger.info("Mock transcription mode")
             return None
-
+        
         try:
-            # Use ElevenLabs Speech-to-Text (if available)
-            # Note: ElevenLabs Scribe API usage
+            # Wrap the raw bytes in a file-like object
+            audio_file = io.BytesIO(audio_data)
+            audio_file.name = "audio.wav"  # vital: helps API detect format
+
+            # Call the API with the correct 'file' argument
             result = await asyncio.to_thread(
                 self._client.speech_to_text.convert,
-                audio=audio_data,
-                language_code=language,
+                file=audio_file,     
+                model_id="scribe_v2",
             )
             return result.text
+
         except Exception as e:
             logger.error(f"Transcription error: {e}")
             return None
+    
 
     async def text_to_speech_stream(
         self,
@@ -193,15 +199,17 @@ class ElevenLabsService:
             return
 
         try:
-            # Use the sync API with streaming
-            audio_generator = self._client.text_to_speech.convert_as_stream(
+            audio_generator = await asyncio.to_thread(
+                self._client.text_to_speech.convert,
                 voice_id=self.voice_id,
                 model_id=self.model_id,
                 text=warning_text,
+                output_format="mp3_44100_128",
+                stream=True,
                 voice_settings={
-                    "stability": 0.7,  # Slightly higher for clarity
+                    "stability": 0.5,
                     "similarity_boost": 0.75,
-                    "style": 0.0,  # Neutral, professional tone
+                    "style": 0.0,
                     "use_speaker_boost": True,
                 },
             )
