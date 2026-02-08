@@ -78,15 +78,29 @@ export default function Home() {
 
       case "transcript":
       case "transcript_added":
-        setTranscriptEntries((prev) => [
-          ...prev,
-          {
-            id: `t-${Date.now()}`,
-            text: message.text,
-            speaker: "doctor",
-            timestamp: new Date(message.timestamp),
-          },
-        ])
+        if (message.is_final) {
+          // Committed transcript: remove any partial entry and add final
+          setTranscriptEntries((prev) => [
+            ...prev.filter((e) => e.id !== "partial-current"),
+            {
+              id: `t-${Date.now()}`,
+              text: message.text,
+              speaker: "doctor",
+              timestamp: new Date(message.timestamp),
+            },
+          ])
+        } else {
+          // Partial transcript: replace the previous partial entry
+          setTranscriptEntries((prev) => [
+            ...prev.filter((e) => e.id !== "partial-current"),
+            {
+              id: "partial-current",
+              text: message.text,
+              speaker: "doctor",
+              timestamp: new Date(message.timestamp),
+            },
+          ])
+        }
         break
 
       case "safety_alert": {

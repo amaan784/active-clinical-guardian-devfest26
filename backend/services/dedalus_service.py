@@ -106,9 +106,23 @@ class DedalusService:
                 # mcp_servers=["dedalus/medical-ref-mcp"] # <--- Placeholder for future MCP integration
             )
 
-            # Validated output is automatically parsed into the Pydantic model
-            intent: ClinicalIntent = response.final_output
-            return intent.model_dump()
+            # The runner may return a ClinicalIntent model or a raw string
+            raw = response.final_output
+            if isinstance(raw, ClinicalIntent):
+                return raw.model_dump()
+            elif isinstance(raw, dict):
+                return raw
+            elif isinstance(raw, str):
+                # Try to parse the string as JSON, then validate
+                try:
+                    parsed = json.loads(raw)
+                    intent = ClinicalIntent(**parsed)
+                    return intent.model_dump()
+                except (json.JSONDecodeError, Exception):
+                    logger.warning(f"Could not parse Dedalus output as ClinicalIntent: {raw[:200]}")
+                    return {"medications": [], "procedures": [], "diagnoses": [], "risk_level": "UNKNOWN"}
+            else:
+                return {"medications": [], "procedures": [], "diagnoses": [], "risk_level": "UNKNOWN"}
 
         except Exception as e:
             logger.error(f"Error analyzing clinical intent: {e}")

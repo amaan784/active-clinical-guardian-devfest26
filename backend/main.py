@@ -23,7 +23,7 @@ from config import get_settings
 from agents.clinical_agent import ClinicalAgent, AgentState
 from services.snowflake_service import SnowflakeService
 from services.k2_service import K2SafetyService
-from services.elevenlabs_service import ElevenLabsService, AudioStreamProcessor
+from services.elevenlabs_service import ElevenLabsService
 from services.dedalus_service import DedalusService
 from services.flowglad_service import FlowgladService
 from models.schemas import SafetyCheckResult, PatientData
@@ -468,8 +468,8 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
         on_interruption=on_interruption,
     )
 
-    # Start the ElevenLabs Transcription Stream
-    await elevenlabs_service.start_transcription_stream(on_transcript_text)
+    # Start the ElevenLabs Transcription Stream (per-session connection)
+    scribe_connection = await elevenlabs_service.start_transcription_stream(on_transcript_text)
 
     try:
         while True:
@@ -480,7 +480,9 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
 
             # Handle binary audio data -> Push to ElevenLabs Stream
             if "bytes" in message:
-                await elevenlabs_service.send_audio_chunk(message["bytes"])
+                audio_bytes = message["bytes"]
+                logger.debug(f"Audio chunk received: {len(audio_bytes)} bytes")
+                await elevenlabs_service.send_audio_chunk(scribe_connection, audio_bytes)
 
             # Handle JSON messages (Control signals)
             elif "text" in message:
@@ -492,15 +494,19 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
                     text = data.get("text", "")
                     speaker = data.get("speaker", "doctor")
                     await agent.add_transcript(text, speaker)
-                    
-                    # Also trigger intent analysis for manual text
+
+                    # Echo back to frontend so it appears in the transcript panel
+                    await websocket.send_json({
+                        "type": "transcript",
+                        "text": text,
+                        "is_final": True,
+                        "timestamp": datetime.now().isoformat(),
+                    })
+
+                    # Run safety pipeline on manual text (same as committed Scribe text)
                     if speaker == "doctor" and text.strip():
-                        intent = await dedalus_service.analyze_clinical_intent(text)
-                        await websocket.send_json({
-                            "type": "clinical_intent",
-                            "intent": intent,
-                            "timestamp": datetime.now().isoformat(),
-                        })
+                        result = await orchestrate_safety_check(text, agent)
+                        await agent.process_safety_result(result)
 
                 elif msg_type == "pause":
                     await agent.pause_consult()
@@ -562,8 +568,8 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:
-        # Cleanup the ElevenLabs stream when WS closes
-        await elevenlabs_service.end_transcription_stream()
+        # Cleanup the per-session ElevenLabs stream when WS closes
+        await elevenlabs_service.close_transcription_stream(scribe_connection)
 
 
 @app.websocket("/ws/audio-only")
@@ -582,18 +588,18 @@ async def websocket_audio_only(websocket: WebSocket):
             "is_final": is_final
         })
 
-    await elevenlabs_service.start_transcription_stream(on_transcript_text)
+    audio_scribe_conn = await elevenlabs_service.start_transcription_stream(on_transcript_text)
 
     try:
         while True:
             message = await websocket.receive()
             if "bytes" in message:
-                await elevenlabs_service.send_audio_chunk(message["bytes"])
+                await elevenlabs_service.send_audio_chunk(audio_scribe_conn, message["bytes"])
 
     except WebSocketDisconnect:
         logger.info("Audio-only WebSocket disconnected")
     finally:
-        await elevenlabs_service.end_transcription_stream()
+        await elevenlabs_service.close_transcription_stream(audio_scribe_conn)
 
 
 # --- Demo/Test Endpoints ---

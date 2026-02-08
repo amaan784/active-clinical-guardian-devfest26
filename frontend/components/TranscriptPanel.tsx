@@ -81,7 +81,7 @@ export function TranscriptPanel({ entries, isRecording }: TranscriptPanelProps) 
                       {formatTime(entry.timestamp)}
                     </span>
                   </div>
-                  <p className="text-sm pl-1">{entry.text}</p>
+                  <p className={`text-sm pl-1 ${entry.id.startsWith("partial-") ? "italic text-muted-foreground" : ""}`}>{entry.text}</p>
                 </div>
               ))}
               <div ref={scrollRef} />
