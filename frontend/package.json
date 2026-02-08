@@ -1,7 +1,7 @@
 {
   "name": "synapse2-frontend",
   "version": "2.0.0",
-  "description": "Synapse 2.0 - The Active Clinical Guardian Dashboard",
+  "description": "The Active Clinical Guardian Dashboard",
   "private": true,
   "scripts": {
     "dev": "next dev",

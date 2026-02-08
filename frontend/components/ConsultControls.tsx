@@ -9,7 +9,6 @@ import {
   Play,
   Pause,
   Square,
-  AlertTriangle,
   Clock,
 } from "lucide-react"
 import { formatDuration } from "@/lib/utils"
@@ -23,7 +22,6 @@ interface ConsultControlsProps {
   onPause: () => void
   onResume: () => void
   onEnd: () => void
-  onSimulateDanger?: () => void
 }
 
 export function ConsultControls({
@@ -35,7 +33,6 @@ export function ConsultControls({
   onPause,
   onResume,
   onEnd,
-  onSimulateDanger,
 }: ConsultControlsProps) {
   return (
     <Card>
@@ -62,19 +59,6 @@ export function ConsultControls({
 
           {/* Controls */}
           <div className="flex items-center gap-2">
-            {/* Demo: Simulate Danger Button */}
-            {onSimulateDanger && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={onSimulateDanger}
-                className="text-caution border-caution hover:bg-caution/10"
-              >
-                <AlertTriangle className="h-4 w-4 mr-2" />
-                Demo: Trigger Alert
-              </Button>
-            )}
-
             {/* Recording Toggle */}
             <Button
               variant={isRecording ? "danger" : "default"}

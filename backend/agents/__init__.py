@@ -1,5 +1,5 @@
 """
-Synapse 2.0 Agent Module
+The Active Clinical Guardian - Agent Module
 Dedalus-style agent orchestration
 """
 

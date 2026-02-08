@@ -5,7 +5,7 @@ import './globals.css'
 const inter = Inter({ subsets: ['latin'] })
 
 export const metadata: Metadata = {
-  title: 'Synapse 2.0 - The Active Clinical Guardian',
+  title: 'The Active Clinical Guardian',
   description: 'Real-time clinical safety monitoring and documentation system',
 }
 

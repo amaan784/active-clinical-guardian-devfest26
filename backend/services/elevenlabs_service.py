@@ -1,60 +1,174 @@
 """
-Synapse 2.0 ElevenLabs Service
+The Active Clinical Guardian - ElevenLabs Service
 Voice I/O for transcription and text-to-speech interruptions
 """
 
 import logging
 import asyncio
 import base64
+import io
 from typing import Optional, Callable, AsyncGenerator
-import json
 
 from config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# Conditional imports
+# SDK imports (elevenlabs v2.34.0)
 try:
-    from elevenlabs import ElevenLabs
-    from elevenlabs.core import ApiError
+    from elevenlabs import ElevenLabs, RealtimeEvents
+    from elevenlabs.realtime.scribe import AudioFormat, CommitStrategy
+    from elevenlabs.realtime.connection import RealtimeConnection
     ELEVENLABS_AVAILABLE = True
 except ImportError:
     ELEVENLABS_AVAILABLE = False
     logger.warning("ElevenLabs SDK not available")
 
-try:
-    import websockets
-    WEBSOCKETS_AVAILABLE = True
-except ImportError:
-    WEBSOCKETS_AVAILABLE = False
-    logger.warning("websockets library not available")
+
+class ManagedScribeConnection:
+    """
+    Wrapper around RealtimeConnection that handles:
+    - Lazy connection: only opens the Scribe WebSocket on the first audio chunk
+    - Auto-reconnect: if the server closes (e.g. inactivity timeout), reconnects
+      transparently on the next send
+    - Clean close: caller calls close() when the session ends
+
+    IMPORTANT: Only ONE ElevenLabs Scribe connection may be active at a time.
+    The asyncio.Lock + cooldown prevents the flood of concurrent connect() calls
+    that previously caused rate-limiting.
+    """
+
+    # Cooldown (seconds) after a failed send before we attempt to reconnect
+    _RECONNECT_COOLDOWN = 3.0
+
+    def __init__(self, client: "ElevenLabs", on_text: Callable[[str, bool], None]):
+        self._client = client
+        self._on_text = on_text
+        self._connection: Optional["RealtimeConnection"] = None
+        self._closed = False
+        self._lock = asyncio.Lock()
+        self._reconnect_after: float = 0  # monotonic timestamp
+
+    async def _ensure_connected(self) -> Optional["RealtimeConnection"]:
+        """Open (or reopen) the Scribe connection if needed."""
+        if self._closed:
+            return None
+
+        # Fast path: already have a live connection
+        if self._connection is not None:
+            return self._connection
+
+        # Cooldown: don't reconnect too quickly after a failure
+        now = asyncio.get_event_loop().time()
+        if now < self._reconnect_after:
+            return None
+
+        # Slow path: acquire lock so only one connect() runs at a time
+        async with self._lock:
+            # Re-check after acquiring lock (another coroutine may have connected)
+            if self._connection is not None:
+                return self._connection
+            if self._closed:
+                return None
+
+            try:
+                logger.info("Opening Scribe connection...")
+                connection: RealtimeConnection = await self._client.speech_to_text.realtime.connect({
+                    "model_id": "scribe_v2_realtime",
+                    "audio_format": AudioFormat.PCM_16000,
+                    "sample_rate": 16000,
+                    "commit_strategy": CommitStrategy.VAD,
+                    "language_code": "en",
+                })
+
+                on_text = self._on_text  # capture for closures
+
+                def on_session_started(data):
+                    logger.info(f"Scribe session started (session_id={data.get('session_id', '?')})")
+
+                def on_partial_transcript(data):
+                    text = data.get("text", "") if isinstance(data, dict) else getattr(data, "text", "")
+                    if text:
+                        asyncio.create_task(on_text(text, False))
+
+                def on_committed_transcript(data):
+                    text = data.get("text", "") if isinstance(data, dict) else getattr(data, "text", "")
+                    if text:
+                        asyncio.create_task(on_text(text, True))
+
+                def on_error(error):
+                    logger.error(f"Scribe error: {error}")
+
+                def on_close():
+                    logger.info("Scribe connection closed by server")
+
+                connection.on(RealtimeEvents.SESSION_STARTED, on_session_started)
+                connection.on(RealtimeEvents.PARTIAL_TRANSCRIPT, on_partial_transcript)
+                connection.on(RealtimeEvents.COMMITTED_TRANSCRIPT, on_committed_transcript)
+                connection.on(RealtimeEvents.ERROR, on_error)
+                connection.on(RealtimeEvents.CLOSE, on_close)
+
+                self._connection = connection
+                logger.info("ElevenLabs Scribe v2 realtime stream connected")
+                return connection
+
+            except Exception as e:
+                logger.error(f"Failed to open Scribe connection: {e}")
+                self._reconnect_after = asyncio.get_event_loop().time() + self._RECONNECT_COOLDOWN
+                return None
+
+    async def send(self, audio_data: bytes) -> None:
+        """Send PCM audio; opens/reopens connection as needed."""
+        conn = await self._ensure_connected()
+        if conn is None:
+            return
+        try:
+            audio_b64 = base64.b64encode(audio_data).decode("ascii")
+            await conn.send({"audio_base_64": audio_b64})
+        except Exception as e:
+            logger.error(f"Error sending audio chunk: {e}")
+            # Mark connection as dead so next send will reconnect (after cooldown)
+            self._connection = None
+            self._reconnect_after = asyncio.get_event_loop().time() + self._RECONNECT_COOLDOWN
+
+    async def close(self) -> None:
+        """Permanently close this managed connection."""
+        self._closed = True
+        if self._connection is not None:
+            try:
+                await self._connection.close()
+            except Exception as e:
+                logger.error(f"Error closing Scribe connection: {e}")
+            self._connection = None
 
 
 class ElevenLabsService:
     """
     ElevenLabs integration for:
-    - Voice transcription (Scribe)
+    - Voice transcription (Scribe v2 Realtime)
     - Text-to-speech with low-latency streaming (Turbo v2.5)
     - Real-time voice interruptions
+
+    Architecture note:
+    - The service holds a shared ElevenLabs *client* (API key, HTTP pool).
+    - Each WebSocket session gets its own ManagedScribeConnection via
+      start_transcription_stream(), which returns the managed wrapper.
+    - The wrapper handles lazy connect and auto-reconnect.
+    - The caller (main.py) owns the connection lifecycle.
     """
 
     def __init__(self):
         self.settings = get_settings()
-        self._client = None
-        self._tts_ws = None
+        self._client: Optional[ElevenLabs] = None
 
         # Voice settings
         self.voice_id = self.settings.elevenlabs_voice_id
-        self.model_id = "eleven_turbo_v2_5"  # Low-latency model
-
-        # TTS WebSocket URL
-        self.tts_ws_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/stream-input?model_id={self.model_id}"
+        self.tts_model_id = "eleven_turbo_v2_5"
 
     async def initialize(self) -> bool:
         """Initialize ElevenLabs client"""
         if not ELEVENLABS_AVAILABLE:
-            logger.warning("ElevenLabs not available, using mock mode")
-            return True
+            logger.error("ElevenLabs SDK not available")
+            return False
 
         if not self.settings.elevenlabs_api_key:
             logger.warning("ElevenLabs API key not configured")
@@ -69,144 +183,107 @@ class ElevenLabsService:
             return False
 
     async def close(self) -> None:
-        """Close connections"""
-        if self._tts_ws:
-            await self._tts_ws.close()
+        """Close the shared client (connections are closed by callers)"""
+        self._client = None
 
-    async def transcribe_audio(
+    # ──────────────────────────────────────────────────────────────────────────
+    #  Real-time Scribe Transcription (Streaming)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    async def start_transcription_stream(
         self,
-        audio_data: bytes,
-        language: str = "en"
-    ) -> Optional[str]:
+        on_text: Callable[[str, bool], None],
+    ) -> Optional[ManagedScribeConnection]:
         """
-        Transcribe audio using ElevenLabs Scribe
+        Create a managed Scribe v2 realtime connection wrapper.
 
-        Args:
-            audio_data: Raw audio bytes (WAV/MP3 format)
-            language: Language code
+        The actual WebSocket to ElevenLabs is opened **lazily** on the first
+        audio chunk, avoiding the 15-second inactivity timeout that occurs
+        when the connection is opened before the user starts speaking.
 
-        Returns:
-            Transcribed text or None
+        If the server closes the connection (e.g. silence timeout), the
+        wrapper will automatically reconnect on the next audio chunk.
+
+        Returns a ManagedScribeConnection (or None if not configured).
         """
         if not self._client:
-            # Mock transcription for demo
-            logger.info("Mock transcription mode")
+            logger.error("ElevenLabs not configured — cannot start transcription")
+            return None
+
+        return ManagedScribeConnection(self._client, on_text)
+
+    @staticmethod
+    async def send_audio_chunk(
+        connection: Optional[ManagedScribeConnection],
+        audio_data: bytes,
+    ) -> None:
+        """
+        Send a PCM audio chunk via the managed Scribe connection.
+        The connection is opened lazily on the first call.
+        """
+        if connection is None:
+            return
+        await connection.send(audio_data)
+
+    @staticmethod
+    async def close_transcription_stream(
+        connection: Optional[ManagedScribeConnection],
+    ) -> None:
+        """Gracefully close a managed Scribe connection."""
+        if connection is None:
+            return
+        await connection.close()
+
+    # ──────────────────────────────────────────────────────────────────────────
+    #  Legacy / Fallback Transcription (REST)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    async def transcribe_audio(self, audio_data: bytes, language: str = "en") -> Optional[str]:
+        """One-off transcription via REST API (Scribe v2 batch)"""
+        if not self._client:
             return None
 
         try:
-            # Use ElevenLabs Speech-to-Text (if available)
-            # Note: ElevenLabs Scribe API usage
+            audio_file = io.BytesIO(audio_data)
+            audio_file.name = "audio.wav"
+
             result = await asyncio.to_thread(
                 self._client.speech_to_text.convert,
-                audio=audio_data,
-                language_code=language,
+                file=audio_file,
+                model_id="scribe_v2",
             )
             return result.text
         except Exception as e:
             logger.error(f"Transcription error: {e}")
             return None
 
-    async def text_to_speech_stream(
-        self,
-        text: str,
-        on_audio_chunk: Callable[[bytes], None]
-    ) -> bool:
+    # ──────────────────────────────────────────────────────────────────────────
+    #  Text-to-Speech (TTS)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    async def speak_interruption(self, warning_text: str) -> AsyncGenerator[bytes, None]:
         """
-        Stream text-to-speech audio using WebSocket for minimal latency
+        Generate low-latency interruption speech.
 
-        Args:
-            text: Text to convert to speech
-            on_audio_chunk: Callback for each audio chunk
-
-        Returns:
-            Success status
+        SDK v2.34.0 exposes two TTS methods:
+          - convert()  → returns full audio (bytes iterator)
+          - stream()   → returns a streaming iterator (lower TTFB)
+        We use stream() for minimal latency on safety alerts.
         """
-        if not WEBSOCKETS_AVAILABLE:
-            logger.warning("WebSockets not available for TTS streaming")
-            return False
-
-        if not self.settings.elevenlabs_api_key:
-            logger.info(f"Mock TTS: Would speak: {text}")
-            return True
-
-        try:
-            async with websockets.connect(
-                self.tts_ws_url,
-                extra_headers={"xi-api-key": self.settings.elevenlabs_api_key}
-            ) as ws:
-                # Send initial configuration
-                await ws.send(json.dumps({
-                    "text": " ",
-                    "voice_settings": {
-                        "stability": 0.5,
-                        "similarity_boost": 0.75,
-                    },
-                    "xi_api_key": self.settings.elevenlabs_api_key,
-                }))
-
-                # Send the actual text
-                await ws.send(json.dumps({
-                    "text": text,
-                    "try_trigger_generation": True,
-                }))
-
-                # Send end of stream signal
-                await ws.send(json.dumps({
-                    "text": "",
-                }))
-
-                # Receive audio chunks
-                async for message in ws:
-                    data = json.loads(message)
-                    if "audio" in data and data["audio"]:
-                        audio_bytes = base64.b64decode(data["audio"])
-                        on_audio_chunk(audio_bytes)
-                    if data.get("isFinal"):
-                        break
-
-                return True
-
-        except Exception as e:
-            logger.error(f"TTS streaming error: {e}")
-            return False
-
-    async def speak_interruption(
-        self,
-        warning_text: str
-    ) -> AsyncGenerator[bytes, None]:
-        """
-        Generate speech for clinical interruption
-
-        This is optimized for low-latency delivery of urgent warnings
-
-        Args:
-            warning_text: The warning to speak
-
-        Yields:
-            Audio chunks as bytes
-        """
-        logger.info(f"Generating interruption speech: {warning_text}")
-
-        if not self._client or not self.settings.elevenlabs_api_key:
-            # Return empty for mock mode
-            logger.info(f"Mock interruption: {warning_text}")
+        if not self._client:
+            logger.error("ElevenLabs not configured — cannot generate speech")
             return
 
         try:
-            # Use the sync API with streaming
-            audio_generator = self._client.text_to_speech.convert_as_stream(
+            audio_iterator = await asyncio.to_thread(
+                self._client.text_to_speech.stream,
                 voice_id=self.voice_id,
-                model_id=self.model_id,
+                model_id=self.tts_model_id,
                 text=warning_text,
-                voice_settings={
-                    "stability": 0.7,  # Slightly higher for clarity
-                    "similarity_boost": 0.75,
-                    "style": 0.0,  # Neutral, professional tone
-                    "use_speaker_boost": True,
-                },
+                output_format="mp3_44100_128",
             )
 
-            for chunk in audio_generator:
+            for chunk in audio_iterator:
                 yield chunk
 
         except Exception as e:
@@ -215,85 +292,23 @@ class ElevenLabsService:
     async def get_available_voices(self) -> list[dict]:
         """Get list of available voices"""
         if not self._client:
-            return [
-                {"voice_id": "21m00Tcm4TlvDq8ikWAM", "name": "Rachel (Default)"},
-                {"voice_id": "AZnzlk1XvdvUeBnXmlld", "name": "Domi"},
-                {"voice_id": "EXAVITQu4vr4xnSDxMaL", "name": "Bella"},
-            ]
-
+            return []
         try:
             voices = await asyncio.to_thread(self._client.voices.get_all)
-            return [
-                {"voice_id": v.voice_id, "name": v.name}
-                for v in voices.voices
-            ]
-        except Exception as e:
-            logger.error(f"Error getting voices: {e}")
+            return [{"voice_id": v.voice_id, "name": v.name} for v in voices.voices]
+        except Exception:
             return []
 
 
 class AudioStreamProcessor:
     """
-    Processes incoming audio stream for real-time transcription
-
-    Handles buffering, silence detection, and chunking
+    Thin pass-through kept for backward compatibility.
+    With Scribe v2 realtime, buffering/silence-detection is handled
+    server-side by ElevenLabs (CommitStrategy.VAD).
     """
 
-    def __init__(
-        self,
-        sample_rate: int = 16000,
-        silence_threshold: float = 0.01,
-        silence_duration: float = 1.0,
-    ):
-        self.sample_rate = sample_rate
-        self.silence_threshold = silence_threshold
-        self.silence_duration = silence_duration
-
+    def __init__(self, sample_rate: int = 16000):
         self._buffer: list[bytes] = []
-        self._silence_frames = 0
 
-    def add_chunk(self, audio_chunk: bytes) -> Optional[bytes]:
-        """
-        Add audio chunk to buffer
-
-        Returns complete utterance when silence is detected
-        """
-        self._buffer.append(audio_chunk)
-
-        # Simple silence detection based on amplitude
-        # In production, use proper VAD (Voice Activity Detection)
-        try:
-            import numpy as np
-            audio_array = np.frombuffer(audio_chunk, dtype=np.int16)
-            amplitude = np.abs(audio_array).mean() / 32768.0
-
-            if amplitude < self.silence_threshold:
-                self._silence_frames += 1
-            else:
-                self._silence_frames = 0
-
-            # Check if we've had enough silence to segment
-            frames_for_duration = int(self.silence_duration * self.sample_rate / len(audio_chunk))
-            if self._silence_frames >= frames_for_duration and len(self._buffer) > 1:
-                # Return buffered audio and reset
-                complete_audio = b"".join(self._buffer)
-                self._buffer.clear()
-                self._silence_frames = 0
-                return complete_audio
-
-        except ImportError:
-            # Without numpy, just buffer and return periodically
-            if len(self._buffer) >= 50:  # ~3 seconds at typical chunk size
-                complete_audio = b"".join(self._buffer)
-                self._buffer.clear()
-                return complete_audio
-
-        return None
-
-    def flush(self) -> Optional[bytes]:
-        """Flush remaining buffer"""
-        if self._buffer:
-            complete_audio = b"".join(self._buffer)
-            self._buffer.clear()
-            return complete_audio
-        return None
+    def add_chunk(self, chunk: bytes) -> bytes:
+        return chunk

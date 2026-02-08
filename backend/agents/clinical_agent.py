@@ -1,5 +1,5 @@
 """
-Synapse 2.0 Clinical Agent
+The Active Clinical Guardian - Clinical Agent
 Dedalus-style state machine for managing clinical encounter flow
 """
 

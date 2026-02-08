@@ -1,5 +1,5 @@
 """
-Synapse 2.0 Pydantic Schemas
+The Active Clinical Guardian - Pydantic Schemas
 All data models for the clinical safety system
 """
 

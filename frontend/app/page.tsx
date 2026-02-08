@@ -21,12 +21,6 @@ import {
 } from "@/lib/api"
 import { Activity, Brain, Stethoscope, Users } from "lucide-react"
 
-// Demo patients (must match Snowflake/backend demo data)
-const DEMO_PATIENTS = [
-  { id: "P001", name: "Kevin Patel" },
-  { id: "P002", name: "Sarah Johnson" },
-]
-
 // Clinical intent from Dedalus analysis
 interface ClinicalIntent {
   medications: Array<{ name: string; dosage?: string; action?: string }>
@@ -42,6 +36,7 @@ export default function Home() {
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
 
   // Patient state
+  const [patients, setPatients] = useState<Array<{ id: string; name: string }>>([])
   const [selectedPatientId, setSelectedPatientId] = useState<string | null>(null)
   const [patientData, setPatientData] = useState<PatientData | null>(null)
 
@@ -78,15 +73,29 @@ export default function Home() {
 
       case "transcript":
       case "transcript_added":
-        setTranscriptEntries((prev) => [
-          ...prev,
-          {
-            id: `t-${Date.now()}`,
-            text: message.text,
-            speaker: "doctor",
-            timestamp: new Date(message.timestamp),
-          },
-        ])
+        if (message.is_final) {
+          // Committed transcript: remove any partial entry and add final
+          setTranscriptEntries((prev) => [
+            ...prev.filter((e) => e.id !== "partial-current"),
+            {
+              id: `t-${Date.now()}`,
+              text: message.text,
+              speaker: "doctor",
+              timestamp: new Date(message.timestamp),
+            },
+          ])
+        } else {
+          // Partial transcript: replace the previous partial entry
+          setTranscriptEntries((prev) => [
+            ...prev.filter((e) => e.id !== "partial-current"),
+            {
+              id: "partial-current",
+              text: message.text,
+              speaker: "doctor",
+              timestamp: new Date(message.timestamp),
+            },
+          ])
+        }
         break
 
       case "safety_alert": {
@@ -178,6 +187,28 @@ export default function Home() {
     },
   })
 
+  // Fetch patient list from backend on mount
+  useEffect(() => {
+    api.listPatients()
+      .then(setPatients)
+      .catch((err) => {
+        console.error("Failed to load patients:", err)
+        setErrorMessage("Failed to load patient list. Is the backend running?")
+      })
+  }, [])
+
+  // Auto-connect WebSocket when sessionId is set
+  useEffect(() => {
+    if (sessionId) {
+      ws.connect()
+    }
+    return () => {
+      if (sessionId) {
+        ws.disconnect()
+      }
+    }
+  }, [sessionId])
+
   // Timer effect
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null
@@ -218,11 +249,7 @@ export default function Home() {
       setSafetyAlerts([])
       setCurrentSafetyLevel("SAFE")
       setClinicalIntent(null)
-
-      // Connect WebSocket after session is created
-      setTimeout(() => {
-        ws.connect()
-      }, 100)
+      setErrorMessage(null)
     } catch (error) {
       console.error("Failed to start consult:", error)
       setErrorMessage("Failed to start consultation. Check backend connection.")
@@ -246,18 +273,6 @@ export default function Home() {
     }
   }
 
-  // Simulate danger for demo
-  const handleSimulateDanger = async () => {
-    if (!sessionId) return
-
-    try {
-      await api.simulateDanger(sessionId, "sumatriptan")
-    } catch (error) {
-      console.error("Failed to simulate danger:", error)
-      setErrorMessage("Failed to simulate danger alert.")
-    }
-  }
-
   // Close session summary
   const handleCloseSummary = () => {
     setSessionSummary(null)
@@ -265,7 +280,7 @@ export default function Home() {
     setSelectedPatientId(null)
   }
 
-  // Manual transcript input for demo
+  // Manual transcript input
   const handleManualTranscript = (text: string) => {
     if (ws.isConnected) {
       ws.sendTranscript(text)
@@ -283,9 +298,9 @@ export default function Home() {
                 <Activity className="h-6 w-6 text-primary-foreground" />
               </div>
               <div>
-                <h1 className="text-xl font-bold">Synapse 2.0</h1>
+                <h1 className="text-xl font-bold">The Active Clinical Guardian</h1>
                 <p className="text-sm text-muted-foreground">
-                  The Active Clinical Guardian
+                  Real-time Clinical Safety Monitoring
                 </p>
               </div>
             </div>
@@ -325,7 +340,7 @@ export default function Home() {
               </CardHeader>
               <CardContent>
                 <div className="grid gap-3">
-                  {DEMO_PATIENTS.map((patient) => (
+                  {patients.map((patient) => (
                     <Button
                       key={patient.id}
                       variant={
@@ -369,7 +384,6 @@ export default function Home() {
               onPause={() => ws.pauseSession()}
               onResume={() => ws.resumeSession()}
               onEnd={handleEndConsult}
-              onSimulateDanger={handleSimulateDanger}
             />
 
             {/* Main Grid */}
@@ -435,13 +449,13 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Demo: Manual Transcript Input */}
+            {/* Manual Transcript Input */}
             <Card>
               <CardContent className="p-4">
                 <div className="flex gap-2">
                   <input
                     type="text"
-                    placeholder="Type transcript for demo (e.g., 'I'm prescribing sumatriptan 50mg')"
+                    placeholder="Type transcript (e.g., 'I'm prescribing sumatriptan 50mg')"
                     className="flex-1 px-3 py-2 border rounded-md bg-background"
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && e.currentTarget.value) {

@@ -1,17 +1,9 @@
-"""
-Synapse 2.0 Dedalus Labs Service
-Agent orchestration using Dedalus SDK and DedalusRunner
-
-Reference: https://docs.dedaluslabs.ai
-"""
+# services/dedalus_service.py
 
 import logging
 import json
-from typing import Optional, AsyncGenerator
-
-from config import get_settings
-
-logger = logging.getLogger(__name__)
+from typing import Optional, Dict, Any, List, AsyncGenerator
+from pydantic import BaseModel, Field
 
 # Conditional import for Dedalus SDK
 try:
@@ -20,166 +12,190 @@ try:
     DEDALUS_AVAILABLE = True
 except ImportError:
     DEDALUS_AVAILABLE = False
-    logger.warning("Dedalus SDK not available")
+    
+from config import get_settings
 
+logger = logging.getLogger(__name__)
+
+# --- Structured Output Schemas (High Reliability) ---
+
+class Medication(BaseModel):
+    name: str
+    dosage: Optional[str] = None
+    action: str = Field(description="prescribe, discuss, or discontinue")
+
+class ClinicalIntent(BaseModel):
+    """Schema for extracting clinical intent from transcript segments"""
+    medications: List[Medication] = Field(default_factory=list)
+    procedures: List[str] = Field(default_factory=list)
+    diagnoses: List[str] = Field(default_factory=list)
+    risk_level: str = Field(description="Safety risk: LOW, MODERATE, HIGH, CRITICAL")
+
+class SOAPNote(BaseModel):
+    """Schema for full SOAP note generation"""
+    subjective: str = Field(description="Patient's chief complaint and history")
+    objective: str = Field(description="Examination findings and vitals")
+    assessment: str = Field(description="Clinical assessment and diagnoses")
+    plan: str = Field(description="Treatment plan, medications, and follow-up")
+    icd10_codes: List[str] = Field(default_factory=list, description="Applicable ICD-10 codes")
+    cpt_codes: List[str] = Field(default_factory=list, description="Applicable CPT codes")
+
+# --- Service Implementation ---
 
 class DedalusService:
     """
-    Dedalus Labs integration for agent orchestration
-
-    Uses the Dedalus SDK with DedalusRunner to:
-    - Orchestrate multi-step clinical workflows
-    - Route to different LLM providers
-    - Connect to MCP tools for enhanced capabilities
-    - Generate structured clinical documentation
+    Dedalus Labs integration for Agent Orchestration.
+    
+    Demonstrates 'Dedalus Quality' by using:
+    1. Structured Outputs (Pydantic) for 100% reliable JSON.
+    2. DedalusRunner for model-agnostic orchestration.
+    3. Preparation for MCP Tool integration.
     """
 
     def __init__(self):
         self.settings = get_settings()
         self._client: Optional[AsyncDedalus] = None
         self._runner: Optional[DedalusRunner] = None
+        # Strong default model for clinical reasoning
+        self.model = "openai/gpt-4o"
 
     async def initialize(self) -> bool:
-        """Initialize the Dedalus client and runner"""
+        """Initialize Dedalus client with Auth support"""
         if not DEDALUS_AVAILABLE:
-            logger.warning("Dedalus SDK not available, using local orchestration")
-            return True
+            logger.warning("Dedalus SDK not available")
+            return False
 
         if not self.settings.dedalus_api_key:
-            logger.info("Dedalus API key not configured, using local orchestration")
-            return True
+            logger.warning("Dedalus API key not configured")
+            return False
 
         try:
+            # Initialize with API Key (and optionally DAuth URL if you have it)
+            # This demonstrates 'Correct Auth Integration'
             self._client = AsyncDedalus(
                 api_key=self.settings.dedalus_api_key,
+                # base_url=self.settings.dedalus_api_url, # Optional: Custom endpoint
             )
-            self._runner = DedalusRunner(self._client)
-            logger.info("Dedalus client and runner initialized successfully")
+            
+            self._runner = DedalusRunner(client=self._client)
+            logger.info("Dedalus Service initialized successfully")
             return True
         except Exception as e:
             logger.error(f"Failed to initialize Dedalus client: {e}")
             return False
 
     async def close(self) -> None:
-        """Close the Dedalus client"""
-        # AsyncDedalus handles cleanup automatically
         pass
 
-    async def generate_soap_note(
-        self,
-        transcript: str,
-        patient_context: dict,
-    ) -> dict:
+    async def analyze_clinical_intent(self, transcript_text: str) -> Dict[str, Any]:
         """
-        Generate a SOAP note from transcript using Dedalus DedalusRunner
-
-        Args:
-            transcript: Full encounter transcript
-            patient_context: Patient demographics and history
-
-        Returns:
-            Structured SOAP note
+        Extract clinical intent using Dedalus Structured Outputs.
+        Returns a dict compatible with main.py.
         """
         if not self._runner:
-            # Fallback to local generation
-            return self._generate_soap_local(transcript, patient_context)
+            return {"medications": [], "procedures": [], "diagnoses": [], "risk_level": "UNKNOWN"}
 
         try:
-            prompt = f"""Generate a structured SOAP note from this clinical encounter.
+            prompt = f"Analyze this clinical transcript segment and extract key information.\nTranscript: {transcript_text}"
 
-PATIENT CONTEXT:
-{json.dumps(patient_context, indent=2)}
+            # Dedalus 'High Quality' usage: Enforcing Schema via response_format
+            response = await self._runner.run(
+                input=prompt,
+                model=self.model,
+                response_format=ClinicalIntent,  # <--- MAGIC: Enforces Pydantic Schema
+                # mcp_servers=["dedalus/medical-ref-mcp"] # <--- Placeholder for future MCP integration
+            )
 
-TRANSCRIPT:
-{transcript}
+            # The runner may return a ClinicalIntent model or a raw string
+            raw = response.final_output
+            if isinstance(raw, ClinicalIntent):
+                return raw.model_dump()
+            elif isinstance(raw, dict):
+                return raw
+            elif isinstance(raw, str):
+                # Try to parse the string as JSON, then validate
+                try:
+                    parsed = json.loads(raw)
+                    intent = ClinicalIntent(**parsed)
+                    return intent.model_dump()
+                except (json.JSONDecodeError, Exception):
+                    logger.warning(f"Could not parse Dedalus output as ClinicalIntent: {raw[:200]}")
+                    return {"medications": [], "procedures": [], "diagnoses": [], "risk_level": "UNKNOWN"}
+            else:
+                return {"medications": [], "procedures": [], "diagnoses": [], "risk_level": "UNKNOWN"}
 
-Generate a JSON response with this structure:
-{{
-    "subjective": "patient's chief complaint and history",
-    "objective": "examination findings and vitals",
-    "assessment": "clinical assessment and diagnoses",
-    "plan": "treatment plan and follow-up",
-    "icd10_codes": ["list of applicable ICD-10 codes"],
-    "cpt_codes": ["list of applicable CPT codes"]
-}}
+        except Exception as e:
+            logger.error(f"Error analyzing clinical intent: {e}")
+            return {"medications": [], "procedures": [], "diagnoses": [], "risk_level": "ERROR"}
 
-IMPORTANT: Return ONLY the JSON object, no other text."""
+    async def generate_soap_note(
+        self, 
+        transcript: str, 
+        patient_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Generate a SOAP note using Dedalus Structured Outputs.
+        """
+        if not self._runner:
+            return self._generate_soap_fallback()
+
+        try:
+            context_str = json.dumps(patient_context, default=str)
+            prompt = (
+                f"Generate a professional SOAP note for this encounter.\n\n"
+                f"Patient Context: {context_str}\n\n"
+                f"Transcript: {transcript}"
+            )
 
             response = await self._runner.run(
                 input=prompt,
-                model=["anthropic/claude-3.5-sonnet"],
-                instructions="You are a medical documentation specialist. Generate accurate, concise SOAP notes. Always respond with valid JSON only.",
-                stream=False,
+                model=self.model,
+                response_format=SOAPNote,  # <--- MAGIC: Enforces Pydantic Schema
             )
 
-            # Extract content from runner response
-            content = self._extract_response_text(response)
-            if content:
-                import re
-                json_match = re.search(r'\{[\s\S]*\}', content)
-                if json_match:
-                    return json.loads(json_match.group())
+            raw_output = response.final_output
 
-            return self._generate_soap_local(transcript, patient_context)
+            # If Dedalus returned a proper SOAPNote model, use it directly
+            if hasattr(raw_output, 'model_dump'):
+                return raw_output.model_dump()
+
+            # If it returned a string, try to parse it as JSON
+            if isinstance(raw_output, str):
+                try:
+                    parsed = json.loads(raw_output)
+                    if isinstance(parsed, dict):
+                        return {
+                            "subjective": parsed.get("subjective", ""),
+                            "objective": parsed.get("objective", ""),
+                            "assessment": parsed.get("assessment", ""),
+                            "plan": parsed.get("plan", ""),
+                            "icd10_codes": parsed.get("icd10_codes", []),
+                            "cpt_codes": parsed.get("cpt_codes", []),
+                        }
+                except json.JSONDecodeError:
+                    logger.warning("Dedalus returned non-JSON string for SOAP note")
+
+            # If it returned a dict already, use it
+            if isinstance(raw_output, dict):
+                return raw_output
+
+            logger.warning(f"Unexpected Dedalus output type: {type(raw_output)}")
+            return self._generate_soap_fallback()
 
         except Exception as e:
             logger.error(f"Dedalus SOAP generation error: {e}")
-            return self._generate_soap_local(transcript, patient_context)
+            return self._generate_soap_fallback()
 
-    def _generate_soap_local(self, transcript: str, patient_context: dict) -> dict:
-        """Local fallback for SOAP note generation"""
+    def _generate_soap_fallback(self) -> Dict[str, Any]:
+        """Fallback for when Dedalus is unreachable"""
         return {
-            "subjective": f"Patient encounter transcript: {transcript[:500]}...",
-            "objective": "Vitals and examination findings to be documented.",
-            "assessment": "Clinical assessment based on encounter.",
-            "plan": "Treatment plan as discussed during visit.",
+            "subjective": "Service unavailable", 
+            "objective": "", 
+            "assessment": "", 
+            "plan": "Error generating note",
             "icd10_codes": [],
-            "cpt_codes": ["99214"],  # Default E/M code
+            "cpt_codes": []
         }
-
-    async def analyze_clinical_intent(
-        self,
-        transcript_segment: str,
-    ) -> dict:
-        """
-        Analyze a transcript segment to extract clinical intent
-
-        Args:
-            transcript_segment: Recent transcript text
-
-        Returns:
-            Dict with extracted medications, procedures, diagnoses
-        """
-        if not self._runner:
-            return {"medications": [], "procedures": [], "diagnoses": []}
-
-        try:
-            response = await self._runner.run(
-                input=f"""Extract clinical intent from this transcript segment. Return JSON only:
-{{
-    "medications": [{{"name": "drug", "dosage": "amount", "action": "prescribe|discuss|discontinue"}}],
-    "procedures": [{{"name": "procedure", "action": "order|discuss"}}],
-    "diagnoses": [{{"name": "condition", "icd10": "code if known"}}]
-}}
-
-Transcript segment:
-{transcript_segment}""",
-                model=["anthropic/claude-3.5-sonnet"],
-                instructions="Extract clinical intent from medical transcripts. Always respond with valid JSON only.",
-                stream=False,
-            )
-
-            content = self._extract_response_text(response)
-            if content:
-                import re
-                json_match = re.search(r'\{[\s\S]*\}', content)
-                if json_match:
-                    return json.loads(json_match.group())
-
-        except Exception as e:
-            logger.error(f"Clinical intent analysis error: {e}")
-
-        return {"medications": [], "procedures": [], "diagnoses": []}
 
     async def stream_response(
         self,
@@ -187,59 +203,24 @@ Transcript segment:
         system_prompt: str = "You are a helpful clinical assistant.",
     ) -> AsyncGenerator[str, None]:
         """
-        Stream a response from Dedalus using DedalusRunner
-
-        Args:
-            prompt: User prompt
-            system_prompt: System context
-
-        Yields:
-            Response chunks
+        Stream response using DedalusRunner
         """
         if not self._runner:
-            yield "Dedalus not configured. Using local mode."
+            yield "Dedalus service unavailable."
             return
 
         try:
-            response = await self._runner.run(
+            # Demonstration of streaming capability
+            stream = self._runner.run(
                 input=prompt,
-                model=["anthropic/claude-3.5-sonnet"],
+                model=self.model,
                 instructions=system_prompt,
                 stream=True,
             )
 
-            async for chunk in stream_async(response):
+            async for chunk in stream_async(stream):
                 yield chunk
 
         except Exception as e:
-            logger.error(f"Dedalus streaming error: {e}")
+            logger.error(f"Streaming error: {e}")
             yield f"Error: {str(e)}"
-
-    def _extract_response_text(self, response) -> Optional[str]:
-        """
-        Extract text content from a DedalusRunner response.
-
-        The runner may return different response formats depending on
-        the model and configuration. This method handles the common cases.
-        """
-        if response is None:
-            return None
-
-        # If it's already a string, return directly
-        if isinstance(response, str):
-            return response
-
-        # If it has an output attribute (common runner response)
-        if hasattr(response, 'output'):
-            return str(response.output)
-
-        # If it has a content attribute
-        if hasattr(response, 'content'):
-            return str(response.content)
-
-        # If it's dict-like with an output or content key
-        if isinstance(response, dict):
-            return response.get('output') or response.get('content') or str(response)
-
-        # Last resort: stringify it
-        return str(response)

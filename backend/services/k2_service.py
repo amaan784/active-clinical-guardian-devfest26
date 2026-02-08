@@ -1,5 +1,5 @@
 """
-Synapse 2.0 K2 Think Safety Service
+The Active Clinical Guardian - K2 Think Safety Service
 System 2 reasoning for drug interaction validation using K2-Think-V2
 
 K2 Think is accessed via OpenAI-compatible API hosted at api.k2think.ai
@@ -91,6 +91,26 @@ DRUG_CLASS_MAP = {
     "phenelzine": "MAOI",
     "tranylcypromine": "MAOI",
     "selegiline": "MAOI",
+    # Penicillin-class antibiotics (common allergy triggers)
+    "penicillin": "Penicillin",
+    "amoxicillin": "Penicillin",
+    "ampicillin": "Penicillin",
+    "augmentin": "Penicillin",
+    "piperacillin": "Penicillin",
+    # Sulfonamides (common allergy triggers)
+    "sulfamethoxazole": "Sulfonamide",
+    "bactrim": "Sulfonamide",
+    "septra": "Sulfonamide",
+    # Other common medications
+    "acetaminophen": "Analgesic",
+    "tylenol": "Analgesic",
+    "amlodipine": "Calcium Channel Blocker",
+    "diltiazem": "Calcium Channel Blocker",
+    "verapamil": "Calcium Channel Blocker",
+    "omeprazole": "PPI",
+    "pantoprazole": "PPI",
+    "gabapentin": "Anticonvulsant",
+    "pregabalin": "Anticonvulsant",
 }
 
 
@@ -363,30 +383,46 @@ class K2SafetyService:
 
         detected_medications = self._extract_medications_from_text(transcript_text)
 
-        if not detected_medications:
-            return SafetyCheckResult(
-                safety_level=SafetyLevel.SAFE,
-                risk_score=0.0,
-                detected_medications=[],
-                interactions=[],
-                requires_interruption=False,
-            )
+        if detected_medications:
+            logger.info(f"Detected medications in transcript: {detected_medications}")
+        else:
+            logger.info("No known medications detected in transcript, checking allergies only")
 
-        logger.info(f"Detected medications in transcript: {detected_medications}")
-
-        # Check for drug interactions
+        # Check for drug interactions (only if medications were detected)
         interactions = self._check_interactions_rule_based(
             detected_medications,
             patient_data.current_medications
-        )
+        ) if detected_medications else []
 
-        # Check for allergy conflicts
+        # Check for allergy conflicts (against detected medications)
         allergy_conflicts = []
         for drug in detected_medications:
+            drug_class = self._get_drug_class(drug)
             for allergy in patient_data.allergies:
-                if allergy.lower() in drug.lower() or drug.lower() in allergy.lower():
+                allergy_lower = allergy.lower()
+                # Direct name match (e.g. "penicillin" vs allergy "Penicillin")
+                if allergy_lower in drug.lower() or drug.lower() in allergy_lower:
                     allergy_conflicts.append({
                         "drug": drug,
+                        "allergy": allergy,
+                        "severity": SafetyLevel.CRITICAL,
+                    })
+                # Class match (e.g. drug "amoxicillin" → class "Penicillin" vs allergy "Penicillin")
+                elif drug_class and allergy_lower in drug_class.lower():
+                    allergy_conflicts.append({
+                        "drug": drug,
+                        "allergy": allergy,
+                        "severity": SafetyLevel.CRITICAL,
+                    })
+
+        # Also scan raw transcript for allergy keywords even if no drug was detected
+        # This catches cases like typing just "Penicillin" without a prescription verb
+        if not allergy_conflicts:
+            transcript_lower = transcript_text.lower()
+            for allergy in patient_data.allergies:
+                if allergy.lower() in transcript_lower:
+                    allergy_conflicts.append({
+                        "drug": allergy,
                         "allergy": allergy,
                         "severity": SafetyLevel.CRITICAL,
                     })
