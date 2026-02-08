@@ -153,8 +153,34 @@ class DedalusService:
                 response_format=SOAPNote,  # <--- MAGIC: Enforces Pydantic Schema
             )
 
-            soap_note: SOAPNote = response.final_output
-            return soap_note.model_dump()
+            raw_output = response.final_output
+
+            # If Dedalus returned a proper SOAPNote model, use it directly
+            if hasattr(raw_output, 'model_dump'):
+                return raw_output.model_dump()
+
+            # If it returned a string, try to parse it as JSON
+            if isinstance(raw_output, str):
+                try:
+                    parsed = json.loads(raw_output)
+                    if isinstance(parsed, dict):
+                        return {
+                            "subjective": parsed.get("subjective", ""),
+                            "objective": parsed.get("objective", ""),
+                            "assessment": parsed.get("assessment", ""),
+                            "plan": parsed.get("plan", ""),
+                            "icd10_codes": parsed.get("icd10_codes", []),
+                            "cpt_codes": parsed.get("cpt_codes", []),
+                        }
+                except json.JSONDecodeError:
+                    logger.warning("Dedalus returned non-JSON string for SOAP note")
+
+            # If it returned a dict already, use it
+            if isinstance(raw_output, dict):
+                return raw_output
+
+            logger.warning(f"Unexpected Dedalus output type: {type(raw_output)}")
+            return self._generate_soap_fallback()
 
         except Exception as e:
             logger.error(f"Dedalus SOAP generation error: {e}")

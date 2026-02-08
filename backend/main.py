@@ -348,8 +348,8 @@ async def end_consult(session_id: str):
     except Exception as e:
         logger.error(f"Failed to save session to Snowflake (non-fatal): {e}")
 
-    # Remove from active sessions
-    del active_sessions[session_id]
+    # Remove from active sessions (may already be removed by WS handler)
+    active_sessions.pop(session_id, None)
 
     return EndConsultResponse(
         session_id=session_id,
@@ -367,6 +367,13 @@ async def get_session_status(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
     return agent.get_session_info()
+
+
+@app.get("/api/patients")
+async def list_patients():
+    """Get all patients from Snowflake"""
+    patients = await snowflake_service.list_patients()
+    return patients
 
 
 @app.get("/api/patients/{patient_id}")
@@ -490,7 +497,7 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
                 msg_type = data.get("type")
 
                 if msg_type == "transcript":
-                    # Fallback/Demo: Text input manually sent from frontend
+                    # Text input manually sent from frontend
                     text = data.get("text", "")
                     speaker = data.get("speaker", "doctor")
                     await agent.add_transcript(text, speaker)
@@ -600,43 +607,6 @@ async def websocket_audio_only(websocket: WebSocket):
         logger.info("Audio-only WebSocket disconnected")
     finally:
         await elevenlabs_service.close_transcription_stream(audio_scribe_conn)
-
-
-# --- Demo/Test Endpoints ---
-
-@app.post("/api/demo/simulate-danger")
-async def simulate_danger(session_id: str, drug_name: str = "sumatriptan"):
-    """
-    Simulate a dangerous prescription for demo purposes
-    """
-    agent = active_sessions.get(session_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    demo_text = f"I'm going to prescribe {drug_name} 50mg for your migraine."
-    await agent.add_transcript(demo_text)
-
-    result = await orchestrate_safety_check(demo_text, agent)
-    await agent.process_safety_result(result)
-
-    return {
-        "demo_text": demo_text,
-        "safety_result": result.model_dump(),
-    }
-
-
-@app.get("/api/demo/speak")
-async def demo_speak(text: str = "Doctor, this is a test of the voice interruption system."):
-    """Test text-to-speech"""
-    chunks = []
-    async for chunk in elevenlabs_service.speak_interruption(text):
-        chunks.append(len(chunk))
-
-    return {
-        "text": text,
-        "audio_chunks": len(chunks),
-        "total_bytes": sum(chunks),
-    }
 
 
 if __name__ == "__main__":

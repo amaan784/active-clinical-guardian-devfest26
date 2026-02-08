@@ -77,7 +77,7 @@ class FlowgladService:
     async def initialize(self) -> None:
         """Initialize HTTP client with Flowglad authentication"""
         if not self.settings.flowglad_api_key:
-            logger.info("Flowglad API key not configured, using mock mode")
+            logger.error("Flowglad API key not configured — set FLOWGLAD_API_KEY in .env")
             return
 
         self._client = httpx.AsyncClient(
@@ -175,7 +175,7 @@ class FlowgladService:
         Uses customerExternalId which is the ID from YOUR database
         """
         if not self._client:
-            return {"id": customer_external_id, "status": "mock"}
+            raise RuntimeError("Flowglad not configured — set FLOWGLAD_API_KEY in .env")
 
         try:
             # Check if customer exists
@@ -205,7 +205,7 @@ class FlowgladService:
             details: Customer details (name, email, etc.)
         """
         if not self._client:
-            return {"id": customer_external_id, "status": "mock_created"}
+            raise RuntimeError("Flowglad not configured — set FLOWGLAD_API_KEY in .env")
 
         try:
             response = await self._client.post(
@@ -255,15 +255,8 @@ class FlowgladService:
             for code in billing_request.cpt_codes
         )
 
-        # Mock response if API not configured
         if not self._client:
-            logger.info(f"Mock invoice created: ${total_amount:.2f}")
-            return BillingResponse(
-                invoice_id=f"INV-{billing_request.session_id[:8].upper()}",
-                total_amount=total_amount,
-                status="created",
-                created_at=datetime.now(),
-            )
+            raise RuntimeError("Flowglad not configured — set FLOWGLAD_API_KEY in .env")
 
         try:
             # Ensure customer exists
@@ -307,13 +300,7 @@ class FlowgladService:
 
         except Exception as e:
             logger.error(f"Flowglad API error: {e}")
-            # Return mock response on error
-            return BillingResponse(
-                invoice_id=f"INV-{billing_request.session_id[:8].upper()}",
-                total_amount=total_amount,
-                status="pending",
-                created_at=datetime.now(),
-            )
+            raise
 
     async def check_feature_access(
         self,
@@ -326,7 +313,7 @@ class FlowgladService:
         Uses Flowglad's useBilling pattern with checkFeatureAccess
         """
         if not self._client:
-            return True  # Allow all in mock mode
+            raise RuntimeError("Flowglad not configured — set FLOWGLAD_API_KEY in .env")
 
         try:
             response = await self._client.get(
@@ -380,12 +367,7 @@ class FlowgladService:
     async def get_billing_summary(self, patient_id: str) -> dict:
         """Get billing summary for a patient"""
         if not self._client:
-            return {
-                "total_invoices": 0,
-                "total_amount": 0.0,
-                "pending_amount": 0.0,
-                "paid_amount": 0.0,
-            }
+            raise RuntimeError("Flowglad not configured — set FLOWGLAD_API_KEY in .env")
 
         try:
             response = await self._client.get(

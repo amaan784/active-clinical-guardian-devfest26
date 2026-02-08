@@ -167,8 +167,8 @@ class ElevenLabsService:
     async def initialize(self) -> bool:
         """Initialize ElevenLabs client"""
         if not ELEVENLABS_AVAILABLE:
-            logger.warning("ElevenLabs not available, using mock mode")
-            return True
+            logger.error("ElevenLabs SDK not available")
+            return False
 
         if not self.settings.elevenlabs_api_key:
             logger.warning("ElevenLabs API key not configured")
@@ -204,10 +204,10 @@ class ElevenLabsService:
         If the server closes the connection (e.g. silence timeout), the
         wrapper will automatically reconnect on the next audio chunk.
 
-        Returns a ManagedScribeConnection (or None in mock mode).
+        Returns a ManagedScribeConnection (or None if not configured).
         """
         if not self._client:
-            logger.info("Mock transcription mode — no ElevenLabs client")
+            logger.error("ElevenLabs not configured — cannot start transcription")
             return None
 
         return ManagedScribeConnection(self._client, on_text)
@@ -271,7 +271,7 @@ class ElevenLabsService:
         We use stream() for minimal latency on safety alerts.
         """
         if not self._client:
-            logger.info(f"Mock TTS: {warning_text}")
+            logger.error("ElevenLabs not configured — cannot generate speech")
             return
 
         try:

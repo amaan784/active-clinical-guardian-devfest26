@@ -25,36 +25,8 @@ try:
     SNOWFLAKE_AVAILABLE = True
 except ImportError:
     SNOWFLAKE_AVAILABLE = False
-    logger.warning("Snowflake connector not available. Using mock data.")
+    logger.warning("Snowflake connector not available.")
 
-
-# Demo patient data — only used when Snowflake is not connected
-_DEMO_PATIENTS = {
-    "P001": PatientData(
-        patient_id="P001",
-        name="Kevin Patel",
-        date_of_birth=datetime(1985, 3, 15),
-        allergies=["Penicillin", "Sulfa drugs"],
-        current_medications=[
-            Medication(name="Sertraline", dosage="100mg", frequency="Once daily", drug_class="SSRI"),
-            Medication(name="Lisinopril", dosage="10mg", frequency="Once daily", drug_class="ACE Inhibitor"),
-        ],
-        medical_history=["Hypertension", "Generalized Anxiety Disorder"],
-        recent_diagnoses=["Migraine without aura"],
-    ),
-    "P002": PatientData(
-        patient_id="P002",
-        name="Sarah Johnson",
-        date_of_birth=datetime(1972, 8, 22),
-        allergies=["Latex"],
-        current_medications=[
-            Medication(name="Warfarin", dosage="5mg", frequency="Once daily", drug_class="Anticoagulant"),
-            Medication(name="Metoprolol", dosage="50mg", frequency="Twice daily", drug_class="Beta Blocker"),
-        ],
-        medical_history=["Atrial Fibrillation", "DVT History"],
-        recent_diagnoses=["Chronic back pain"],
-    ),
-}
 
 
 class SnowflakeService:
@@ -73,12 +45,12 @@ class SnowflakeService:
     async def connect(self) -> bool:
         """Establish connection to Snowflake (runs sync connect in a thread)"""
         if not SNOWFLAKE_AVAILABLE:
-            logger.info("Snowflake connector not installed — using demo mode")
-            return True
+            logger.error("Snowflake connector not installed")
+            return False
 
         if not self.settings.snowflake_account:
-            logger.info("Snowflake not configured — using demo mode")
-            return True
+            logger.error("Snowflake not configured — set SNOWFLAKE_ACCOUNT in .env")
+            return False
 
         try:
             self._connection = await asyncio.to_thread(
@@ -128,14 +100,29 @@ class SnowflakeService:
     # Patient data
     # ------------------------------------------------------------------
 
-    async def get_patient_data(self, patient_id: str) -> Optional[PatientData]:
-        """
-        Retrieve patient data from Snowflake.
-        Falls back to demo data only if Snowflake is not connected.
-        """
+    async def list_patients(self) -> list[dict]:
+        """Return all patients from Snowflake."""
         if not self._connection:
-            logger.info(f"No Snowflake connection — returning demo data for {patient_id}")
-            return _DEMO_PATIENTS.get(patient_id)
+            logger.error("No Snowflake connection — cannot list patients")
+            return []
+
+        try:
+            rows = await asyncio.to_thread(
+                self._execute_query,
+                "SELECT PATIENT_ID, NAME FROM PATIENT_DATA ORDER BY NAME",
+                (),
+                True,
+            )
+            return [{"id": row["PATIENT_ID"], "name": row["NAME"]} for row in rows]
+        except Exception as e:
+            logger.error(f"Error listing patients: {e}")
+            return []
+
+    async def get_patient_data(self, patient_id: str) -> Optional[PatientData]:
+        """Retrieve patient data from Snowflake."""
+        if not self._connection:
+            logger.error(f"No Snowflake connection — cannot retrieve patient {patient_id}")
+            return None
 
         try:
             # Query patient demographics
@@ -193,8 +180,7 @@ class SnowflakeService:
 
         except Exception as e:
             logger.error(f"Error retrieving patient data: {e}")
-            # Fall back to demo data on error so the app doesn't crash
-            return _DEMO_PATIENTS.get(patient_id)
+            return None
 
     async def get_patient_medications(self, patient_id: str) -> list[Medication]:
         """Get just the medications for a patient"""

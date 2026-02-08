@@ -62,6 +62,7 @@ export interface SafetyAlertMessage {
 export interface TranscriptMessage {
   type: 'transcript' | 'transcript_added'
   text: string
+  is_final?: boolean
   timestamp: string
 }
 
@@ -111,6 +112,14 @@ class SynapseAPI {
     this.baseUrl = baseUrl
   }
 
+  async listPatients(): Promise<Array<{ id: string; name: string }>> {
+    const response = await fetch(`${this.baseUrl}/api/patients`)
+    if (!response.ok) {
+      throw new Error(`Failed to list patients: ${response.statusText}`)
+    }
+    return response.json()
+  }
+
   async getPatient(patientId: string): Promise<PatientData> {
     const response = await fetch(`${this.baseUrl}/api/patients/${patientId}`)
     if (!response.ok) {
@@ -155,17 +164,6 @@ class SynapseAPI {
     })
     if (!response.ok) {
       throw new Error(`Failed to trigger safety check: ${response.statusText}`)
-    }
-    return response.json()
-  }
-
-  async simulateDanger(sessionId: string, drugName: string = 'sumatriptan'): Promise<Record<string, unknown>> {
-    const response = await fetch(
-      `${this.baseUrl}/api/demo/simulate-danger?session_id=${sessionId}&drug_name=${drugName}`,
-      { method: 'POST' }
-    )
-    if (!response.ok) {
-      throw new Error(`Failed to simulate danger: ${response.statusText}`)
     }
     return response.json()
   }

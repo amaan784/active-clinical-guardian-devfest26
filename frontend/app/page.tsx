@@ -21,12 +21,6 @@ import {
 } from "@/lib/api"
 import { Activity, Brain, Stethoscope, Users } from "lucide-react"
 
-// Demo patients (must match Snowflake/backend demo data)
-const DEMO_PATIENTS = [
-  { id: "P001", name: "Kevin Patel" },
-  { id: "P002", name: "Sarah Johnson" },
-]
-
 // Clinical intent from Dedalus analysis
 interface ClinicalIntent {
   medications: Array<{ name: string; dosage?: string; action?: string }>
@@ -42,6 +36,7 @@ export default function Home() {
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
 
   // Patient state
+  const [patients, setPatients] = useState<Array<{ id: string; name: string }>>([])
   const [selectedPatientId, setSelectedPatientId] = useState<string | null>(null)
   const [patientData, setPatientData] = useState<PatientData | null>(null)
 
@@ -192,6 +187,16 @@ export default function Home() {
     },
   })
 
+  // Fetch patient list from backend on mount
+  useEffect(() => {
+    api.listPatients()
+      .then(setPatients)
+      .catch((err) => {
+        console.error("Failed to load patients:", err)
+        setErrorMessage("Failed to load patient list. Is the backend running?")
+      })
+  }, [])
+
   // Auto-connect WebSocket when sessionId is set
   useEffect(() => {
     if (sessionId) {
@@ -268,18 +273,6 @@ export default function Home() {
     }
   }
 
-  // Simulate danger for demo
-  const handleSimulateDanger = async () => {
-    if (!sessionId) return
-
-    try {
-      await api.simulateDanger(sessionId, "sumatriptan")
-    } catch (error) {
-      console.error("Failed to simulate danger:", error)
-      setErrorMessage("Failed to simulate danger alert.")
-    }
-  }
-
   // Close session summary
   const handleCloseSummary = () => {
     setSessionSummary(null)
@@ -287,7 +280,7 @@ export default function Home() {
     setSelectedPatientId(null)
   }
 
-  // Manual transcript input for demo
+  // Manual transcript input
   const handleManualTranscript = (text: string) => {
     if (ws.isConnected) {
       ws.sendTranscript(text)
@@ -347,7 +340,7 @@ export default function Home() {
               </CardHeader>
               <CardContent>
                 <div className="grid gap-3">
-                  {DEMO_PATIENTS.map((patient) => (
+                  {patients.map((patient) => (
                     <Button
                       key={patient.id}
                       variant={
@@ -391,7 +384,6 @@ export default function Home() {
               onPause={() => ws.pauseSession()}
               onResume={() => ws.resumeSession()}
               onEnd={handleEndConsult}
-              onSimulateDanger={handleSimulateDanger}
             />
 
             {/* Main Grid */}
@@ -457,13 +449,13 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Demo: Manual Transcript Input */}
+            {/* Manual Transcript Input */}
             <Card>
               <CardContent className="p-4">
                 <div className="flex gap-2">
                   <input
                     type="text"
-                    placeholder="Type transcript for demo (e.g., 'I'm prescribing sumatriptan 50mg')"
+                    placeholder="Type transcript (e.g., 'I'm prescribing sumatriptan 50mg')"
                     className="flex-1 px-3 py-2 border rounded-md bg-background"
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && e.currentTarget.value) {
