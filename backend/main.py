@@ -134,6 +134,60 @@ class EndConsultResponse(BaseModel):
     duration_minutes: int
 
 
+# --- Orchestrated Safety Pipeline ---
+# Dedalus sits at the center of every safety check:
+#   1. Dedalus: analyze_clinical_intent → extract medications, procedures, diagnoses
+#   2. Snowflake RAG: search guidelines using targeted query from Dedalus output
+#   3. K2 Think: reason over patient data + guidelines + Dedalus intent
+#   4. ElevenLabs: voice interruption if DANGER/CRITICAL
+
+async def orchestrate_safety_check(
+    transcript_text: str,
+    agent: ClinicalAgent,
+) -> SafetyCheckResult:
+    """
+    Full orchestrated safety check pipeline with Dedalus as the coordinator.
+
+    This is the core loop that runs every safety_check_interval seconds.
+    """
+    patient_data = agent.patient_data
+
+    # ── Step 1: Dedalus extracts clinical intent ──
+    # Instead of dumping raw transcript to RAG, Dedalus parses what the doctor
+    # is actually doing: prescribing, ordering, diagnosing
+    intent = await dedalus_service.analyze_clinical_intent(transcript_text)
+
+    # ── Step 2: Build targeted RAG query from Dedalus output ──
+    # Use the extracted medications + patient's current meds to form a precise
+    # search query instead of the raw transcript blob
+    med_names = [m.get("name", "") for m in intent.get("medications", [])]
+    current_med_names = [m.name for m in patient_data.current_medications]
+    current_classes = [m.drug_class for m in patient_data.current_medications if m.drug_class]
+
+    if med_names:
+        # Targeted query: "sumatriptan sertraline SSRI interaction safety"
+        rag_query = " ".join(med_names + current_med_names + current_classes + ["interaction", "safety"])
+        logger.info(f"Dedalus extracted medications: {med_names} → RAG query: {rag_query}")
+    else:
+        # Fallback: use raw transcript if Dedalus didn't find anything
+        rag_query = transcript_text
+        logger.info("No medications extracted by Dedalus, using raw transcript for RAG")
+
+    # ── Step 3: Snowflake RAG search with targeted query ──
+    guidelines = await snowflake_service.search_clinical_guidelines(
+        query=rag_query, limit=3,
+    )
+
+    # ── Step 4: K2 Think reasons over the full context ──
+    result = await k2_service.check_safety(
+        transcript_text=transcript_text,
+        patient_data=patient_data,
+        clinical_guidelines=guidelines,
+    )
+
+    return result
+
+
 # --- REST Endpoints ---
 
 @app.get("/")
@@ -219,11 +273,8 @@ async def trigger_safety_check(session_id: str):
     if not transcript_buffer:
         return {"status": "no_content", "message": "No transcript to check"}
 
-    # Run safety check
-    result = await k2_service.check_safety(
-        transcript_text=transcript_buffer,
-        patient_data=agent.patient_data,
-    )
+    # Run orchestrated safety pipeline (Dedalus → Snowflake RAG → K2)
+    result = await orchestrate_safety_check(transcript_buffer, agent)
 
     # Process the result through the agent
     await agent.process_safety_result(result)
@@ -390,10 +441,7 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
             if agent.state == AgentState.LISTENING and agent._transcript_buffer:
                 buffer_text = agent.get_transcript_buffer()
                 if buffer_text.strip():
-                    result = await k2_service.check_safety(
-                        transcript_text=buffer_text,
-                        patient_data=agent.patient_data,
-                    )
+                    result = await orchestrate_safety_check(buffer_text, agent)
                     await agent.process_safety_result(result)
                     agent.clear_transcript_buffer()
 
@@ -429,15 +477,25 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
 
                 if msg_type == "transcript":
                     # Direct transcript input (for demo/testing)
-                    await agent.add_transcript(
-                        data.get("text", ""),
-                        data.get("speaker", "doctor")
-                    )
+                    text = data.get("text", "")
+                    speaker = data.get("speaker", "doctor")
+                    await agent.add_transcript(text, speaker)
                     await websocket.send_json({
                         "type": "transcript_added",
-                        "text": data.get("text"),
+                        "text": text,
                         "timestamp": datetime.now().isoformat(),
                     })
+
+                    # Run Dedalus intent analysis on doctor speech in background
+                    # so the frontend can display what was detected
+                    if speaker == "doctor" and text.strip():
+                        intent = await dedalus_service.analyze_clinical_intent(text)
+                        if intent.get("medications") or intent.get("procedures") or intent.get("diagnoses"):
+                            await websocket.send_json({
+                                "type": "clinical_intent",
+                                "intent": intent,
+                                "timestamp": datetime.now().isoformat(),
+                            })
 
                 elif msg_type == "pause":
                     await agent.pause_consult()
@@ -465,10 +523,7 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
                     # Manual safety check trigger
                     buffer_text = agent.get_transcript_buffer()
                     if buffer_text:
-                        result = await k2_service.check_safety(
-                            transcript_text=buffer_text,
-                            patient_data=agent.patient_data,
-                        )
+                        result = await orchestrate_safety_check(buffer_text, agent)
                         await agent.process_safety_result(result)
 
     except WebSocketDisconnect:
@@ -532,11 +587,8 @@ async def simulate_danger(session_id: str, drug_name: str = "sumatriptan"):
     demo_text = f"I'm going to prescribe {drug_name} 50mg for your migraine."
     await agent.add_transcript(demo_text)
 
-    # Trigger safety check
-    result = await k2_service.check_safety(
-        transcript_text=demo_text,
-        patient_data=agent.patient_data,
-    )
+    # Run orchestrated safety pipeline (Dedalus → Snowflake RAG → K2)
+    result = await orchestrate_safety_check(demo_text, agent)
 
     await agent.process_safety_result(result)
 
