@@ -49,7 +49,7 @@ export interface BillingInfo {
   status: string
 }
 
-export interface SafetyAlert {
+export interface SafetyAlertMessage {
   type: 'safety_alert'
   safety_level: 'SAFE' | 'CAUTION' | 'DANGER' | 'CRITICAL'
   risk_score: number
@@ -72,11 +72,35 @@ export interface StateChangeMessage {
   timestamp: string
 }
 
-export type WebSocketMessage = SafetyAlert | TranscriptMessage | StateChangeMessage | {
+export interface ClinicalIntentMessage {
+  type: 'clinical_intent'
+  intent: {
+    medications: Array<{ name: string; dosage?: string; action?: string }>
+    procedures: Array<{ name: string; action?: string }>
+    diagnoses: Array<{ name: string; icd10?: string }>
+  }
+  timestamp: string
+}
+
+export interface ConsultEndedMessage {
+  type: 'consult_ended'
+  soap_note: SOAPNote
+  timestamp: string
+}
+
+export interface InterruptionMessage {
   type: 'interruption_start' | 'interruption_end'
   text?: string
   timestamp: string
 }
+
+export type WebSocketMessage =
+  | SafetyAlertMessage
+  | TranscriptMessage
+  | StateChangeMessage
+  | ClinicalIntentMessage
+  | ConsultEndedMessage
+  | InterruptionMessage
 
 class SynapseAPI {
   private baseUrl: string

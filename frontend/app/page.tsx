@@ -19,13 +19,20 @@ import {
   type EndConsultResponse,
   type WebSocketMessage,
 } from "@/lib/api"
-import { Activity, Stethoscope, Users } from "lucide-react"
+import { Activity, Brain, Stethoscope, Users } from "lucide-react"
 
-// Demo patients
+// Demo patients (must match Snowflake/backend demo data)
 const DEMO_PATIENTS = [
-  { id: "P001", name: "Amaan Patel" },
+  { id: "P001", name: "Kevin Patel" },
   { id: "P002", name: "Sarah Johnson" },
 ]
+
+// Clinical intent from Dedalus analysis
+interface ClinicalIntent {
+  medications: Array<{ name: string; dosage?: string; action?: string }>
+  procedures: Array<{ name: string; action?: string }>
+  diagnoses: Array<{ name: string; icd10?: string }>
+}
 
 export default function Home() {
   // Session state
@@ -47,6 +54,9 @@ export default function Home() {
   const [isInterrupting, setIsInterrupting] = useState(false)
   const [interruptionMessage, setInterruptionMessage] = useState("")
 
+  // Clinical intent (from Dedalus analysis)
+  const [clinicalIntent, setClinicalIntent] = useState<ClinicalIntent | null>(null)
+
   // Session summary
   const [sessionSummary, setSessionSummary] = useState<EndConsultResponse | null>(null)
 
@@ -60,6 +70,7 @@ export default function Home() {
         setSessionState(message.new_state)
         if (message.new_state === "PAUSED") setIsPaused(true)
         if (message.new_state === "LISTENING") setIsPaused(false)
+        if (message.new_state === "INTERRUPTING") setIsInterrupting(true)
         break
 
       case "transcript":
@@ -75,7 +86,7 @@ export default function Home() {
         ])
         break
 
-      case "safety_alert":
+      case "safety_alert": {
         const alert: SafetyAlert = {
           id: `sa-${Date.now()}`,
           level: message.safety_level,
@@ -85,6 +96,39 @@ export default function Home() {
         }
         setSafetyAlerts((prev) => [alert, ...prev])
         setCurrentSafetyLevel(message.safety_level)
+        break
+      }
+
+      case "clinical_intent":
+        // Dedalus has detected clinical actions from the transcript
+        setClinicalIntent(message.intent)
+        // Show extracted medications as a system note in transcript
+        if (message.intent.medications?.length > 0) {
+          const medNames = message.intent.medications.map(
+            (m) => `${m.name}${m.dosage ? ` ${m.dosage}` : ""}`
+          ).join(", ")
+          setTranscriptEntries((prev) => [
+            ...prev,
+            {
+              id: `intent-${Date.now()}`,
+              text: `[Detected] Medications: ${medNames}`,
+              speaker: "system",
+              timestamp: new Date(message.timestamp),
+            },
+          ])
+        }
+        break
+
+      case "consult_ended":
+        // WebSocket-initiated end (via ws "end" command)
+        // Build an EndConsultResponse-compatible object for SessionSummary
+        setSessionSummary({
+          session_id: sessionId || "",
+          soap_note: message.soap_note,
+          billing: { invoice_id: "pending", amount: 0, status: "pending" },
+          duration_minutes: Math.floor(elapsedSeconds / 60),
+        })
+        setSessionState("COMPLETED")
         break
 
       case "interruption_start":
@@ -106,7 +150,7 @@ export default function Home() {
         setIsInterrupting(false)
         break
     }
-  }, [])
+  }, [sessionId, elapsedSeconds])
 
   // Handle audio data from WebSocket
   const handleAudioData = useCallback((audioData: ArrayBuffer) => {
@@ -169,6 +213,7 @@ export default function Home() {
       setTranscriptEntries([])
       setSafetyAlerts([])
       setCurrentSafetyLevel("SAFE")
+      setClinicalIntent(null)
 
       // Connect WebSocket after session is created
       setTimeout(() => {
@@ -307,9 +352,48 @@ export default function Home() {
 
             {/* Main Grid */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-              {/* Patient Info */}
-              <div className="lg:col-span-1">
+              {/* Patient Info & Clinical Intent */}
+              <div className="lg:col-span-1 space-y-4">
                 {patientData && <PatientCard patient={patientData} />}
+
+                {/* Clinical Intent (Dedalus Analysis) */}
+                {clinicalIntent && (clinicalIntent.medications.length > 0 || clinicalIntent.procedures.length > 0 || clinicalIntent.diagnoses.length > 0) && (
+                  <Card>
+                    <CardHeader className="pb-3">
+                      <div className="flex items-center gap-2">
+                        <Brain className="h-5 w-5 text-primary" />
+                        <CardTitle className="text-lg">Clinical Intent</CardTitle>
+                      </div>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                      {clinicalIntent.medications.length > 0 && (
+                        <div>
+                          <p className="text-sm font-medium text-muted-foreground mb-1">Medications Detected</p>
+                          <div className="space-y-1">
+                            {clinicalIntent.medications.map((med, i) => (
+                              <div key={i} className="flex items-center justify-between rounded-md bg-muted p-2 text-sm">
+                                <span className="font-medium">{med.name}</span>
+                                <Badge variant="secondary">{med.action || "mentioned"}</Badge>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {clinicalIntent.diagnoses.length > 0 && (
+                        <div>
+                          <p className="text-sm font-medium text-muted-foreground mb-1">Diagnoses</p>
+                          <div className="flex flex-wrap gap-1">
+                            {clinicalIntent.diagnoses.map((dx, i) => (
+                              <Badge key={i} variant="outline">
+                                {dx.name}{dx.icd10 ? ` (${dx.icd10})` : ""}
+                              </Badge>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                )}
               </div>
 
               {/* Transcript */}
