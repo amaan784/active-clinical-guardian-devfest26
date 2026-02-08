@@ -19,6 +19,8 @@ snowflake-snowpark-python==1.45.0
 
 # ElevenLabs (TTS + Scribe transcription)
 elevenlabs>=2.30.0
+sounddevice==0.5.5 
+soundfile==0.13.1
 
 # HTTP Client
 httpx==0.28.1
