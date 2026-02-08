@@ -11,25 +11,25 @@ python-multipart==0.0.9
 dedalus_labs[aiohttp]>=0.2.0
 
 # for K2 Think 
-requests==2.31.0
+requests==2.32.5
 
 # Snowflake
-snowflake-connector-python==3.8.0
-snowflake-snowpark-python==1.12.0
+snowflake-connector-python==4.2.0
+snowflake-snowpark-python==1.45.0
 
 # ElevenLabs (TTS + Scribe transcription)
-elevenlabs>=1.0.0
+elevenlabs>=2.30.0
 
 # HTTP Client
-httpx==0.27.0
-aiohttp==3.10.0
+httpx==0.28.1
+aiohttp==3.13.3
 
 # Data Validation
-pydantic==2.6.0
-pydantic-settings==2.2.0
+pydantic==2.12.5
+pydantic-settings==2.12.0
 
 # Environment
-python-dotenv==1.0.1
+python-dotenv==1.2.1
 
 # Audio Processing
-numpy==1.26.4
+numpy==2.4.2
