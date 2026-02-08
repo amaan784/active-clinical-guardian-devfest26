@@ -60,6 +60,9 @@ export default function Home() {
   // Session summary
   const [sessionSummary, setSessionSummary] = useState<EndConsultResponse | null>(null)
 
+  // Error state
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
+
   // Audio hooks
   const { playAudioChunk } = useAudioPlayer()
 
@@ -125,8 +128,8 @@ export default function Home() {
         setSessionSummary({
           session_id: sessionId || "",
           soap_note: message.soap_note,
-          billing: { invoice_id: "pending", amount: 0, status: "pending" },
-          duration_minutes: Math.floor(elapsedSeconds / 60),
+          billing: message.billing || { invoice_id: "pending", amount: 0, status: "pending" },
+          duration_minutes: message.duration_minutes ?? Math.floor(elapsedSeconds / 60),
         })
         setSessionState("COMPLETED")
         break
@@ -198,6 +201,7 @@ export default function Home() {
       setSelectedPatientId(patientId)
     } catch (error) {
       console.error("Failed to load patient:", error)
+      setErrorMessage("Failed to load patient data. Is the backend running?")
     }
   }
 
@@ -221,6 +225,7 @@ export default function Home() {
       }, 100)
     } catch (error) {
       console.error("Failed to start consult:", error)
+      setErrorMessage("Failed to start consultation. Check backend connection.")
     }
   }
 
@@ -237,6 +242,7 @@ export default function Home() {
       setSessionState("IDLE")
     } catch (error) {
       console.error("Failed to end consult:", error)
+      setErrorMessage("Failed to end consultation. You can try again.")
     }
   }
 
@@ -248,6 +254,7 @@ export default function Home() {
       await api.simulateDanger(sessionId, "sumatriptan")
     } catch (error) {
       console.error("Failed to simulate danger:", error)
+      setErrorMessage("Failed to simulate danger alert.")
     }
   }
 
@@ -289,6 +296,21 @@ export default function Home() {
           </div>
         </div>
       </header>
+
+      {/* Error Banner */}
+      {errorMessage && (
+        <div className="bg-destructive/10 border-b border-destructive/20">
+          <div className="container mx-auto px-4 py-3 flex items-center justify-between">
+            <p className="text-sm text-destructive font-medium">{errorMessage}</p>
+            <button
+              onClick={() => setErrorMessage(null)}
+              className="text-destructive hover:text-destructive/80 text-sm font-medium"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
       <main className="container mx-auto px-4 py-6">
         {!sessionId ? (

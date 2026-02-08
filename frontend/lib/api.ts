@@ -85,6 +85,8 @@ export interface ClinicalIntentMessage {
 export interface ConsultEndedMessage {
   type: 'consult_ended'
   soap_note: SOAPNote
+  billing?: BillingInfo
+  duration_minutes?: number
   timestamp: string
 }
 
