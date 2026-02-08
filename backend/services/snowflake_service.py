@@ -207,10 +207,9 @@ class SnowflakeService:
         temperature: float = 0.7,
     ) -> Optional[str]:
         """
-        Use Snowflake Cortex AI_COMPLETE for LLM inference
+        Use Snowflake Cortex COMPLETE for LLM inference
 
-        REST API: POST /api/v2/cortex/inference:complete
-        SQL: SELECT AI_COMPLETE(model, prompt, options)
+        SQL: SELECT SNOWFLAKE.CORTEX.COMPLETE(model, prompt, options)
         """
         if not self._connection:
             logger.info("Cortex not available, returning None")
@@ -219,9 +218,8 @@ class SnowflakeService:
         try:
             cursor = self._connection.cursor()
 
-            # Use AI_COMPLETE SQL function
             cursor.execute("""
-                SELECT SNOWFLAKE.CORTEX.AI_COMPLETE(
+                SELECT SNOWFLAKE.CORTEX.COMPLETE(
                     %s,
                     %s,
                     {'max_tokens': %s, 'temperature': %s}
@@ -234,15 +232,15 @@ class SnowflakeService:
             return None
 
         except Exception as e:
-            logger.error(f"Cortex AI_COMPLETE error: {e}")
+            logger.error(f"Cortex COMPLETE error: {e}")
             return None
 
     async def cortex_embed(self, text: str, model: str = "e5-base-v2") -> Optional[list[float]]:
         """
-        Create text embeddings using Snowflake Cortex AI_EMBED
+        Create text embeddings using Snowflake Cortex EMBED_TEXT_768
 
-        REST API: POST /api/v2/cortex/inference:embed
-        SQL: SELECT AI_EMBED(model, text)
+        SQL: SELECT SNOWFLAKE.CORTEX.EMBED_TEXT_768(model, text)
+        Returns 768-dimensional float vector for semantic search
         """
         if not self._connection:
             return None
@@ -251,7 +249,7 @@ class SnowflakeService:
             cursor = self._connection.cursor()
 
             cursor.execute("""
-                SELECT SNOWFLAKE.CORTEX.AI_EMBED(%s, %s) AS embedding
+                SELECT SNOWFLAKE.CORTEX.EMBED_TEXT_768(%s, %s) AS embedding
             """, (model, text))
 
             result = cursor.fetchone()
@@ -260,7 +258,7 @@ class SnowflakeService:
             return None
 
         except Exception as e:
-            logger.error(f"Cortex AI_EMBED error: {e}")
+            logger.error(f"Cortex EMBED_TEXT_768 error: {e}")
             return None
 
     async def search_clinical_guidelines(
@@ -403,10 +401,21 @@ Text: {text}"""
 
 # SQL setup script for Snowflake tables
 SNOWFLAKE_SETUP_SQL = """
--- Create database and schema
+-- ============================================================
+-- STEP 1: Create database, schema, and warehouse
+-- ============================================================
 CREATE DATABASE IF NOT EXISTS SYNAPSE_DB;
 USE DATABASE SYNAPSE_DB;
 CREATE SCHEMA IF NOT EXISTS PUBLIC;
+CREATE WAREHOUSE IF NOT EXISTS COMPUTE_WH
+    WITH WAREHOUSE_SIZE = 'XSMALL'
+    AUTO_SUSPEND = 60
+    AUTO_RESUME = TRUE;
+USE WAREHOUSE COMPUTE_WH;
+
+-- ============================================================
+-- STEP 2: Create tables
+-- ============================================================
 
 -- Patient data table
 CREATE TABLE IF NOT EXISTS PATIENT_DATA (
@@ -450,7 +459,7 @@ CREATE TABLE IF NOT EXISTS CLINICAL_GUIDELINES (
     CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
 );
 
--- Clinical sessions
+-- Clinical sessions (records of completed consultations)
 CREATE TABLE IF NOT EXISTS CLINICAL_SESSIONS (
     SESSION_ID VARCHAR PRIMARY KEY,
     PATIENT_ID VARCHAR,
@@ -464,20 +473,75 @@ CREATE TABLE IF NOT EXISTS CLINICAL_SESSIONS (
     CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
 );
 
--- Grant Cortex access
+-- ============================================================
+-- STEP 3: Grant Cortex AI access
+-- ============================================================
 GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE PUBLIC;
 
--- Insert demo patient
+-- ============================================================
+-- STEP 4: Insert demo patient P001 (Amaan Patel)
+-- Scenario: SSRI patient, prescribing a Triptan triggers serotonin syndrome alert
+-- ============================================================
 INSERT INTO PATIENT_DATA (PATIENT_ID, NAME, DATE_OF_BIRTH, MEDICAL_HISTORY, RECENT_DIAGNOSES)
 VALUES ('P001', 'Amaan Patel', '1985-03-15', 'Hypertension,Generalized Anxiety Disorder', 'Migraine without aura');
 
-INSERT INTO PATIENT_MEDICATIONS (PATIENT_ID, MEDICATION_NAME, DOSAGE, FREQUENCY, DRUG_CLASS)
+INSERT INTO PATIENT_MEDICATIONS (PATIENT_ID, MEDICATION_NAME, DOSAGE, FREQUENCY, DRUG_CLASS, ACTIVE)
 VALUES
-    ('P001', 'Sertraline', '100mg', 'Once daily', 'SSRI'),
-    ('P001', 'Lisinopril', '10mg', 'Once daily', 'ACE Inhibitor');
+    ('P001', 'Sertraline', '100mg', 'Once daily', 'SSRI', TRUE),
+    ('P001', 'Lisinopril', '10mg', 'Once daily', 'ACE Inhibitor', TRUE);
 
 INSERT INTO PATIENT_ALLERGIES (PATIENT_ID, ALLERGEN, SEVERITY)
 VALUES
     ('P001', 'Penicillin', 'Severe'),
     ('P001', 'Sulfa drugs', 'Moderate');
+
+-- ============================================================
+-- STEP 5: Insert demo patient P002 (Sarah Johnson)
+-- Scenario: Anticoagulant patient, prescribing an NSAID triggers bleeding risk alert
+-- ============================================================
+INSERT INTO PATIENT_DATA (PATIENT_ID, NAME, DATE_OF_BIRTH, MEDICAL_HISTORY, RECENT_DIAGNOSES)
+VALUES ('P002', 'Sarah Johnson', '1972-08-22', 'Atrial Fibrillation,DVT History', 'Chronic back pain');
+
+INSERT INTO PATIENT_MEDICATIONS (PATIENT_ID, MEDICATION_NAME, DOSAGE, FREQUENCY, DRUG_CLASS, ACTIVE)
+VALUES
+    ('P002', 'Warfarin', '5mg', 'Once daily', 'Anticoagulant', TRUE),
+    ('P002', 'Metoprolol', '50mg', 'Twice daily', 'Beta Blocker', TRUE);
+
+INSERT INTO PATIENT_ALLERGIES (PATIENT_ID, ALLERGEN, SEVERITY)
+VALUES
+    ('P002', 'Latex', 'Moderate');
+
+-- ============================================================
+-- STEP 6: Insert clinical guidelines for RAG search
+-- Embeddings will be generated via Cortex AI_EMBED after insert
+-- ============================================================
+INSERT INTO CLINICAL_GUIDELINES (SOURCE, TITLE, CONTENT)
+VALUES
+    ('FDA Drug Safety Communication',
+     'Serotonin Syndrome Warning - Triptans with SSRIs/SNRIs',
+     'Concurrent use of triptans (e.g., sumatriptan, rizatriptan) with SSRIs or SNRIs may result in serotonin syndrome. Symptoms include agitation, hallucinations, rapid heartbeat, fever, muscle stiffness, and loss of coordination. Healthcare providers should carefully weigh the potential risk of serotonin syndrome against the expected benefit of treatment. If treatment is warranted, patients should be observed for serotonin syndrome symptoms, particularly during treatment initiation and dose increases.'),
+
+    ('Clinical Pharmacology Guidelines',
+     'SSRI Drug Interaction Profile',
+     'Selective serotonin reuptake inhibitors (SSRIs) including sertraline, fluoxetine, and paroxetine can interact with numerous medications. Key interactions include: MAO inhibitors (contraindicated - life threatening serotonin syndrome), triptans (serotonin syndrome risk), anticoagulants (increased bleeding risk via platelet inhibition), and NSAIDs (additive GI bleeding risk). A 14-day washout period is required when switching between SSRIs and MAOIs.'),
+
+    ('Migraine Treatment Protocol',
+     'Triptan Prescribing Guidelines for Patients on Serotonergic Medications',
+     'When prescribing triptans for migraine, verify patient is not taking serotonergic medications. Alternative treatments for patients on SSRIs include: gepants (ubrogepant, rimegepant), NSAIDs, or combination acetaminophen/caffeine. If triptan use is clinically necessary in a patient on an SSRI, use the lowest effective dose and monitor closely for serotonin syndrome symptoms for 24 hours.'),
+
+    ('FDA Drug Safety Communication',
+     'Anticoagulant-NSAID Interaction Warning',
+     'Concurrent use of anticoagulants (warfarin, heparin, direct oral anticoagulants) with NSAIDs (ibuprofen, naproxen, aspirin) significantly increases the risk of gastrointestinal and other bleeding events. NSAIDs inhibit platelet function and can cause gastric mucosal damage, compounding the bleeding risk from anticoagulation. Recommend acetaminophen as first-line analgesic for patients on anticoagulants. If NSAID use is unavoidable, co-prescribe a proton pump inhibitor and monitor INR closely.'),
+
+    ('ACC/AHA Clinical Guidelines',
+     'Anticoagulation Management in Atrial Fibrillation',
+     'Patients with atrial fibrillation on chronic anticoagulation therapy require careful medication management. Avoid concurrent NSAIDs, monitor for drug interactions with new prescriptions. Warfarin patients should maintain stable vitamin K intake and have regular INR monitoring. When adding new medications, check for CYP2C9 and CYP3A4 interactions that may potentiate or reduce anticoagulant effect.');
+
+-- ============================================================
+-- STEP 7: Generate embeddings for clinical guidelines
+-- Run this AFTER inserting guidelines to populate the EMBEDDING column
+-- ============================================================
+UPDATE CLINICAL_GUIDELINES
+SET EMBEDDING = SNOWFLAKE.CORTEX.EMBED_TEXT_768('e5-base-v2', CONTENT)
+WHERE EMBEDDING IS NULL;
 """

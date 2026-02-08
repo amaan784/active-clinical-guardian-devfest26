@@ -2,8 +2,8 @@
 Synapse 2.0 K2 Think Safety Service
 System 2 reasoning for drug interaction validation using K2-Think-V2
 
-K2 Think is accessed via OpenAI-compatible API (vLLM or hosted endpoint)
-Reference: https://huggingface.co/LLM360/K2-Think-V2
+K2 Think is accessed via OpenAI-compatible API hosted at api.k2think.ai
+Reference: https://api.k2think.ai/v1/chat/completions
 """
 
 import logging
@@ -165,9 +165,13 @@ class K2SafetyService:
             logger.info("K2 base URL not configured, using rule-based fallback")
             return
 
+        if not self.settings.k2_api_key:
+            logger.info("K2 API key not configured, using rule-based fallback")
+            return
+
         try:
             self._client = AsyncOpenAI(
-                api_key=self.settings.k2_api_key or "not-needed",  # vLLM may not need key
+                api_key=self.settings.k2_api_key,
                 base_url=self.settings.k2_base_url,
             )
             self._use_k2 = True
@@ -274,7 +278,7 @@ class K2SafetyService:
                 transcript=transcript_text,
             )
 
-            # Call K2 Think via OpenAI-compatible API
+            # Call K2 Think via hosted OpenAI-compatible API
             response = await self._client.chat.completions.create(
                 model=self.settings.k2_model,
                 messages=[
@@ -286,9 +290,6 @@ class K2SafetyService:
                 ],
                 temperature=1.0,
                 max_tokens=2048,
-                extra_body={
-                    "chat_template_kwargs": {"reasoning_effort": "high"},
-                },
             )
 
             # Parse the response

@@ -1,34 +1,35 @@
 # Synapse 2.0 Backend Dependencies
 
 # Web Framework
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
-websockets==12.0
-python-multipart==0.0.6
+fastapi==0.115.0
+uvicorn[standard]==0.29.0
+websockets==13.0
+python-multipart==0.0.9
 
-# Dedalus Labs SDK (Agent Orchestration)
+# Dedalus Labs SDK (Agent Orchestration + DedalusRunner)
+# Provides: AsyncDedalus, DedalusRunner, stream_async
 dedalus_labs[aiohttp]>=0.2.0
 
-# OpenAI SDK (for K2 Think via OpenAI-compatible API)
-openai>=1.0.0
+# for K2 Think 
+requests==2.31.0
 
 # Snowflake
-snowflake-connector-python==3.6.0
-snowflake-snowpark-python==1.11.1
+snowflake-connector-python==3.8.0
+snowflake-snowpark-python==1.12.0
 
-# ElevenLabs
+# ElevenLabs (TTS + Scribe transcription)
 elevenlabs>=1.0.0
 
 # HTTP Client
-httpx==0.26.0
-aiohttp==3.9.1
+httpx==0.27.0
+aiohttp==3.10.0
 
 # Data Validation
-pydantic==2.5.3
-pydantic-settings==2.1.0
+pydantic==2.6.0
+pydantic-settings==2.2.0
 
 # Environment
-python-dotenv==1.0.0
+python-dotenv==1.0.1
 
 # Audio Processing
-numpy==1.26.3
+numpy==1.26.4

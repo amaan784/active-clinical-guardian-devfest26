@@ -24,6 +24,7 @@ from agents.clinical_agent import ClinicalAgent, AgentState
 from services.snowflake_service import SnowflakeService
 from services.k2_service import K2SafetyService
 from services.elevenlabs_service import ElevenLabsService, AudioStreamProcessor
+from services.dedalus_service import DedalusService
 from services.flowglad_service import FlowgladService
 from models.schemas import SafetyCheckResult, PatientData
 
@@ -38,6 +39,7 @@ logger = logging.getLogger(__name__)
 snowflake_service: Optional[SnowflakeService] = None
 k2_service: Optional[K2SafetyService] = None
 elevenlabs_service: Optional[ElevenLabsService] = None
+dedalus_service: Optional[DedalusService] = None
 flowglad_service: Optional[FlowgladService] = None
 
 # Active sessions tracking
@@ -47,7 +49,7 @@ active_sessions: dict[str, ClinicalAgent] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan management"""
-    global snowflake_service, k2_service, elevenlabs_service, flowglad_service
+    global snowflake_service, k2_service, elevenlabs_service, dedalus_service, flowglad_service
 
     # Startup
     logger.info("Initializing Synapse 2.0 services...")
@@ -60,6 +62,9 @@ async def lifespan(app: FastAPI):
 
     elevenlabs_service = ElevenLabsService()
     await elevenlabs_service.initialize()
+
+    dedalus_service = DedalusService()
+    await dedalus_service.initialize()
 
     flowglad_service = FlowgladService()
     await flowglad_service.initialize()
@@ -77,6 +82,8 @@ async def lifespan(app: FastAPI):
         await k2_service.close()
     if elevenlabs_service:
         await elevenlabs_service.close()
+    if dedalus_service:
+        await dedalus_service.close()
     if flowglad_service:
         await flowglad_service.close()
 
@@ -236,12 +243,21 @@ async def end_consult(session_id: str):
     if not agent:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # End the consultation
-    soap_note = await agent.end_consult()
-
     # Calculate duration
     duration = datetime.now() - agent.session.start_time
     duration_minutes = int(duration.total_seconds() / 60)
+
+    # Generate SOAP note via Dedalus (or fallback)
+    patient_context = agent.patient_data.model_dump() if agent.patient_data else {}
+    full_transcript = agent.get_full_transcript()
+
+    soap_dict = await dedalus_service.generate_soap_note(
+        transcript=full_transcript,
+        patient_context=patient_context,
+    )
+
+    # End the consultation with the generated SOAP note
+    soap_note = await agent.end_consult(soap_data=soap_dict)
 
     # Generate billing
     billing_response = await flowglad_service.process_end_of_visit(
@@ -430,7 +446,14 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
                     await agent.resume_consult()
 
                 elif msg_type == "end":
-                    soap_note = await agent.end_consult()
+                    # Generate SOAP note via Dedalus before ending
+                    ws_patient_context = agent.patient_data.model_dump() if agent.patient_data else {}
+                    ws_transcript = agent.get_full_transcript()
+                    ws_soap_dict = await dedalus_service.generate_soap_note(
+                        transcript=ws_transcript,
+                        patient_context=ws_patient_context,
+                    )
+                    soap_note = await agent.end_consult(soap_data=ws_soap_dict)
                     await websocket.send_json({
                         "type": "consult_ended",
                         "soap_note": soap_note.model_dump(),

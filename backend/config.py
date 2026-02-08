@@ -15,10 +15,10 @@ class Settings(BaseSettings):
     dedalus_environment: str = "production"  # or "development"
 
     # K2 Think Configuration (OpenAI-compatible API)
-    # Can be self-hosted vLLM or hosted endpoint
+    # Hosted at https://api.k2think.ai
     k2_api_key: str = ""
-    k2_base_url: str = "http://localhost:8080/v1"  # vLLM endpoint
-    k2_model: str = "LLM360/K2-Think-V2"
+    k2_base_url: str = "https://api.k2think.ai/v1"
+    k2_model: str = "MBZUAI-IFM/K2-Think-v2"
 
     # Snowflake Configuration
     snowflake_account: str = ""
