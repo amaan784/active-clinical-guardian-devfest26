@@ -299,7 +299,7 @@ async def end_consult(session_id: str):
     duration_minutes = int(duration.total_seconds() / 60)
 
     # Generate SOAP note via Dedalus (or fallback)
-    patient_context = agent.patient_data.model_dump() if agent.patient_data else {}
+    patient_context = agent.patient_data.model_dump(mode="json") if agent.patient_data else {}
     full_transcript = agent.get_full_transcript()
 
     soap_dict = await dedalus_service.generate_soap_note(
@@ -310,28 +310,44 @@ async def end_consult(session_id: str):
     # End the consultation with the generated SOAP note
     soap_note = await agent.end_consult(soap_data=soap_dict)
 
-    # Generate billing
-    billing_response = await flowglad_service.process_end_of_visit(
-        session_id=session_id,
-        patient_id=agent.patient_id,
-        provider_id=agent.provider_id,
-        soap_note=soap_note,
-        duration_minutes=duration_minutes,
-        safety_alerts_count=len(agent.session.safety_checks),
-    )
+    # Generate billing (graceful fallback if Flowglad is unreachable)
+    try:
+        billing_response = await flowglad_service.process_end_of_visit(
+            session_id=session_id,
+            patient_id=agent.patient_id,
+            provider_id=agent.provider_id,
+            soap_note=soap_note,
+            duration_minutes=duration_minutes,
+            safety_alerts_count=len(agent.session.safety_checks),
+        )
+        billing_info = {
+            "invoice_id": billing_response.invoice_id,
+            "amount": billing_response.total_amount,
+            "status": billing_response.status,
+        }
+    except Exception as e:
+        logger.error(f"Billing generation failed (non-fatal): {e}")
+        billing_info = {
+            "invoice_id": f"INV-{session_id[:8].upper()}",
+            "amount": 0,
+            "status": "billing_unavailable",
+        }
 
-    # Save to Snowflake
-    await snowflake_service.save_session_record({
-        "session_id": session_id,
-        "patient_id": agent.patient_id,
-        "provider_id": agent.provider_id,
-        "start_time": agent.session.start_time,
-        "end_time": datetime.now(),
-        "transcript": agent.get_full_transcript(),
-        "soap_note": json.dumps(soap_note.model_dump()),
-        "safety_alerts": json.dumps([sc.model_dump() for sc in agent.session.safety_checks]),
-        "billing_info": json.dumps(billing_response.model_dump()),
-    })
+    # Save to Snowflake (non-fatal if it fails)
+    try:
+        await snowflake_service.save_session_record({
+            "session_id": session_id,
+            "patient_id": agent.patient_id,
+            "provider_id": agent.provider_id,
+            "start_time": agent.session.start_time,
+            "end_time": datetime.now(),
+            "transcript": agent.get_full_transcript(),
+            "soap_note": json.dumps(soap_note.model_dump()),
+            "safety_alerts": json.dumps([sc.model_dump() for sc in agent.session.safety_checks]),
+            "billing_info": json.dumps(billing_info),
+        })
+    except Exception as e:
+        logger.error(f"Failed to save session to Snowflake (non-fatal): {e}")
 
     # Remove from active sessions
     del active_sessions[session_id]
@@ -339,11 +355,7 @@ async def end_consult(session_id: str):
     return EndConsultResponse(
         session_id=session_id,
         soap_note=soap_note.model_dump(),
-        billing={
-            "invoice_id": billing_response.invoice_id,
-            "amount": billing_response.total_amount,
-            "status": billing_response.status,
-        },
+        billing=billing_info,
         duration_minutes=duration_minutes,
     )
 
@@ -506,7 +518,7 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
 
                 elif msg_type == "end":
                     # Generate SOAP note via Dedalus before ending
-                    ws_patient_context = agent.patient_data.model_dump() if agent.patient_data else {}
+                    ws_patient_context = agent.patient_data.model_dump(mode="json") if agent.patient_data else {}
                     ws_transcript = agent.get_full_transcript()
                     ws_soap_dict = await dedalus_service.generate_soap_note(
                         transcript=ws_transcript,
@@ -514,26 +526,35 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
                     )
                     soap_note = await agent.end_consult(soap_data=ws_soap_dict)
 
-                    # Generate billing
+                    # Generate billing (graceful fallback)
                     ws_duration = datetime.now() - agent.session.start_time
                     ws_duration_minutes = int(ws_duration.total_seconds() / 60)
-                    ws_billing = await flowglad_service.process_end_of_visit(
-                        session_id=session_id,
-                        patient_id=agent.patient_id,
-                        provider_id=agent.provider_id,
-                        soap_note=soap_note,
-                        duration_minutes=ws_duration_minutes,
-                        safety_alerts_count=len(agent.session.safety_checks),
-                    )
+                    try:
+                        ws_billing = await flowglad_service.process_end_of_visit(
+                            session_id=session_id,
+                            patient_id=agent.patient_id,
+                            provider_id=agent.provider_id,
+                            soap_note=soap_note,
+                            duration_minutes=ws_duration_minutes,
+                            safety_alerts_count=len(agent.session.safety_checks),
+                        )
+                        ws_billing_info = {
+                            "invoice_id": ws_billing.invoice_id,
+                            "amount": ws_billing.total_amount,
+                            "status": ws_billing.status,
+                        }
+                    except Exception as e:
+                        logger.error(f"WS billing failed (non-fatal): {e}")
+                        ws_billing_info = {
+                            "invoice_id": f"INV-{session_id[:8].upper()}",
+                            "amount": 0,
+                            "status": "billing_unavailable",
+                        }
 
                     await websocket.send_json({
                         "type": "consult_ended",
                         "soap_note": soap_note.model_dump(),
-                        "billing": {
-                            "invoice_id": ws_billing.invoice_id,
-                            "amount": ws_billing.total_amount,
-                            "status": ws_billing.status,
-                        },
+                        "billing": ws_billing_info,
                         "duration_minutes": ws_duration_minutes,
                         "timestamp": datetime.now().isoformat(),
                     })

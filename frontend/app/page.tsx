@@ -178,6 +178,18 @@ export default function Home() {
     },
   })
 
+  // Auto-connect WebSocket when sessionId is set
+  useEffect(() => {
+    if (sessionId) {
+      ws.connect()
+    }
+    return () => {
+      if (sessionId) {
+        ws.disconnect()
+      }
+    }
+  }, [sessionId])
+
   // Timer effect
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null
@@ -218,11 +230,7 @@ export default function Home() {
       setSafetyAlerts([])
       setCurrentSafetyLevel("SAFE")
       setClinicalIntent(null)
-
-      // Connect WebSocket after session is created
-      setTimeout(() => {
-        ws.connect()
-      }, 100)
+      setErrorMessage(null)
     } catch (error) {
       console.error("Failed to start consult:", error)
       setErrorMessage("Failed to start consultation. Check backend connection.")
