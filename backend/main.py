@@ -147,8 +147,6 @@ async def orchestrate_safety_check(
 ) -> SafetyCheckResult:
     """
     Full orchestrated safety check pipeline with Dedalus as the coordinator.
-
-    This is the core loop that runs every safety_check_interval seconds.
     """
     patient_data = agent.patient_data
 
@@ -308,6 +306,7 @@ async def end_consult(session_id: str):
     )
 
     # End the consultation with the generated SOAP note
+    # Note: agent.end_consult expects the raw dict which DedalusService now returns
     soap_note = await agent.end_consult(soap_data=soap_dict)
 
     # Generate billing (graceful fallback if Flowglad is unreachable)
@@ -385,13 +384,10 @@ async def get_patient(patient_id: str):
 @app.websocket("/ws/consult/{session_id}")
 async def websocket_consult(websocket: WebSocket, session_id: str):
     """
-    WebSocket endpoint for real-time consultation
-
-    Handles:
-    - Audio streaming (binary)
-    - Transcript updates (JSON)
-    - Safety alerts (JSON)
-    - Voice interruptions (binary audio)
+    WebSocket endpoint for real-time consultation.
+    
+    This endpoint establishes a persistent connection with ElevenLabs Scribe v2
+    to handle real-time streaming transcription and safety checks.
     """
     await websocket.accept()
     logger.info(f"WebSocket connected for session: {session_id}")
@@ -401,10 +397,32 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
         await websocket.close(code=4004, reason="Session not found")
         return
 
-    # Audio processor for buffering
-    audio_processor = AudioStreamProcessor()
+    # Callback to handle incoming text from ElevenLabs stream
+    async def on_transcript_text(text: str, is_final: bool):
+        # 1. Send to Frontend immediately
+        try:
+            await websocket.send_json({
+                "type": "transcript",
+                "text": text,
+                "is_final": is_final,
+                "timestamp": datetime.now().isoformat(),
+            })
+        except Exception as e:
+            logger.error(f"Error sending transcript to WS: {e}")
 
-    # Set up agent callbacks
+        # 2. Logic for Final/Committed text
+        if is_final:
+            # Add to agent memory
+            await agent.add_transcript(text)
+            
+            # Run Orchestrated Safety Check (Dedalus -> Snowflake -> K2)
+            # We use the committed text chunk for immediate analysis
+            result = await orchestrate_safety_check(text, agent)
+            
+            # Process result (triggers on_safety_alert callback if needed)
+            await agent.process_safety_result(result)
+
+    # Set up agent callbacks (to send alerts back to frontend)
     async def on_state_change(old_state: AgentState, new_state: AgentState):
         await websocket.send_json({
             "type": "state_change",
@@ -431,7 +449,7 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
             "timestamp": datetime.now().isoformat(),
         })
 
-        # Generate and stream interruption audio
+        # Generate and stream interruption audio via ElevenLabs
         try:
             async for audio_chunk in elevenlabs_service.speak_interruption(warning_text):
                 await websocket.send_bytes(audio_chunk)
@@ -443,25 +461,15 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
             "timestamp": datetime.now().isoformat(),
         })
 
+    # Register the agent callbacks
     agent.set_callbacks(
         on_state_change=on_state_change,
         on_safety_alert=on_safety_alert,
         on_interruption=on_interruption,
     )
 
-    # Background task for periodic safety checks
-    async def safety_check_loop():
-        while agent.state not in [AgentState.COMPLETED, AgentState.ERROR]:
-            await asyncio.sleep(get_settings().safety_check_interval)
-
-            if agent.state == AgentState.LISTENING and agent._transcript_buffer:
-                buffer_text = agent.get_transcript_buffer()
-                if buffer_text.strip():
-                    result = await orchestrate_safety_check(buffer_text, agent)
-                    await agent.process_safety_result(result)
-                    agent.clear_transcript_buffer()
-
-    safety_task = asyncio.create_task(safety_check_loop())
+    # Start the ElevenLabs Transcription Stream
+    await elevenlabs_service.start_transcription_stream(on_transcript_text)
 
     try:
         while True:
@@ -470,48 +478,29 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
             if message["type"] == "websocket.disconnect":
                 break
 
-            # Handle binary audio data
+            # Handle binary audio data -> Push to ElevenLabs Stream
             if "bytes" in message:
-                audio_data = message["bytes"]
-                complete_utterance = audio_processor.add_chunk(audio_data)
+                await elevenlabs_service.send_audio_chunk(message["bytes"])
 
-                if complete_utterance:
-                    # Transcribe the audio
-                    transcript = await elevenlabs_service.transcribe_audio(complete_utterance)
-                    if transcript:
-                        await agent.add_transcript(transcript)
-                        await websocket.send_json({
-                            "type": "transcript",
-                            "text": transcript,
-                            "timestamp": datetime.now().isoformat(),
-                        })
-
-            # Handle JSON messages
+            # Handle JSON messages (Control signals)
             elif "text" in message:
                 data = json.loads(message["text"])
                 msg_type = data.get("type")
 
                 if msg_type == "transcript":
-                    # Direct transcript input (for demo/testing)
+                    # Fallback/Demo: Text input manually sent from frontend
                     text = data.get("text", "")
                     speaker = data.get("speaker", "doctor")
                     await agent.add_transcript(text, speaker)
-                    await websocket.send_json({
-                        "type": "transcript_added",
-                        "text": text,
-                        "timestamp": datetime.now().isoformat(),
-                    })
-
-                    # Run Dedalus intent analysis on doctor speech in background
-                    # so the frontend can display what was detected
+                    
+                    # Also trigger intent analysis for manual text
                     if speaker == "doctor" and text.strip():
                         intent = await dedalus_service.analyze_clinical_intent(text)
-                        if intent.get("medications") or intent.get("procedures") or intent.get("diagnoses"):
-                            await websocket.send_json({
-                                "type": "clinical_intent",
-                                "intent": intent,
-                                "timestamp": datetime.now().isoformat(),
-                            })
+                        await websocket.send_json({
+                            "type": "clinical_intent",
+                            "intent": intent,
+                            "timestamp": datetime.now().isoformat(),
+                        })
 
                 elif msg_type == "pause":
                     await agent.pause_consult()
@@ -520,16 +509,17 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
                     await agent.resume_consult()
 
                 elif msg_type == "end":
-                    # Generate SOAP note via Dedalus before ending
+                    # Similar logic to endpoint: Generate Note & Billing
                     ws_patient_context = agent.patient_data.model_dump(mode="json") if agent.patient_data else {}
                     ws_transcript = agent.get_full_transcript()
+                    
                     ws_soap_dict = await dedalus_service.generate_soap_note(
                         transcript=ws_transcript,
                         patient_context=ws_patient_context,
                     )
                     soap_note = await agent.end_consult(soap_data=ws_soap_dict)
 
-                    # Generate billing (graceful fallback)
+                    # Billing
                     ws_duration = datetime.now() - agent.session.start_time
                     ws_duration_minutes = int(ws_duration.total_seconds() / 60)
                     try:
@@ -546,30 +536,22 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
                             "amount": ws_billing.total_amount,
                             "status": ws_billing.status,
                         }
-                    except Exception as e:
-                        logger.error(f"WS billing failed (non-fatal): {e}")
-                        ws_billing_info = {
-                            "invoice_id": f"INV-{session_id[:8].upper()}",
-                            "amount": 0,
-                            "status": "billing_unavailable",
-                        }
+                    except Exception:
+                        ws_billing_info = {"invoice_id": "ERROR", "amount": 0, "status": "error"}
 
                     await websocket.send_json({
                         "type": "consult_ended",
                         "soap_note": soap_note.model_dump(),
                         "billing": ws_billing_info,
-                        "duration_minutes": ws_duration_minutes,
                         "timestamp": datetime.now().isoformat(),
                     })
-
-                    # Remove from active sessions
+                    
                     if session_id in active_sessions:
                         del active_sessions[session_id]
-
                     break
 
                 elif msg_type == "check_safety":
-                    # Manual safety check trigger
+                    # Manual trigger
                     buffer_text = agent.get_transcript_buffer()
                     if buffer_text:
                         result = await orchestrate_safety_check(buffer_text, agent)
@@ -580,43 +562,38 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:
-        safety_task.cancel()
-        try:
-            await safety_task
-        except asyncio.CancelledError:
-            pass
+        # Cleanup the ElevenLabs stream when WS closes
+        await elevenlabs_service.end_transcription_stream()
 
 
 @app.websocket("/ws/audio-only")
 async def websocket_audio_only(websocket: WebSocket):
     """
-    Simplified WebSocket for audio-only streaming
-
-    For testing audio I/O without full session management
+    Simplified WebSocket for testing audio streaming.
+    Uses the same ElevenLabs streaming pipeline.
     """
     await websocket.accept()
     logger.info("Audio-only WebSocket connected")
 
-    audio_processor = AudioStreamProcessor()
+    async def on_transcript_text(text: str, is_final: bool):
+        await websocket.send_json({
+            "type": "transcript",
+            "text": text,
+            "is_final": is_final
+        })
+
+    await elevenlabs_service.start_transcription_stream(on_transcript_text)
 
     try:
         while True:
             message = await websocket.receive()
-
             if "bytes" in message:
-                audio_data = message["bytes"]
-                complete_utterance = audio_processor.add_chunk(audio_data)
-
-                if complete_utterance:
-                    transcript = await elevenlabs_service.transcribe_audio(complete_utterance)
-                    if transcript:
-                        await websocket.send_json({
-                            "type": "transcript",
-                            "text": transcript,
-                        })
+                await elevenlabs_service.send_audio_chunk(message["bytes"])
 
     except WebSocketDisconnect:
         logger.info("Audio-only WebSocket disconnected")
+    finally:
+        await elevenlabs_service.end_transcription_stream()
 
 
 # --- Demo/Test Endpoints ---
@@ -625,20 +602,15 @@ async def websocket_audio_only(websocket: WebSocket):
 async def simulate_danger(session_id: str, drug_name: str = "sumatriptan"):
     """
     Simulate a dangerous prescription for demo purposes
-
-    Injects a transcript segment mentioning a dangerous drug
     """
     agent = active_sessions.get(session_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Inject dangerous prescription text
     demo_text = f"I'm going to prescribe {drug_name} 50mg for your migraine."
     await agent.add_transcript(demo_text)
 
-    # Run orchestrated safety pipeline (Dedalus → Snowflake RAG → K2)
     result = await orchestrate_safety_check(demo_text, agent)
-
     await agent.process_safety_result(result)
 
     return {
