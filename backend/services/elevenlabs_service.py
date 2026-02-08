@@ -256,34 +256,42 @@ class AudioStreamProcessor:
         """
         Add audio chunk to buffer
 
-        Returns complete utterance when silence is detected
+        Returns complete utterance when silence is detected.
+        Handles both raw PCM and compressed (webm/opus) audio formats.
         """
         self._buffer.append(audio_chunk)
 
-        # Simple silence detection based on amplitude
-        # In production, use proper VAD (Voice Activity Detection)
+        # Simple silence detection based on amplitude (raw PCM only)
+        # For compressed audio (webm/opus from browser), fall back to chunk counting
         try:
             import numpy as np
-            audio_array = np.frombuffer(audio_chunk, dtype=np.int16)
-            amplitude = np.abs(audio_array).mean() / 32768.0
+            # Only attempt PCM decode if buffer size is a multiple of 2 (int16)
+            if len(audio_chunk) % 2 == 0 and len(audio_chunk) >= 2:
+                audio_array = np.frombuffer(audio_chunk, dtype=np.int16)
+                amplitude = np.abs(audio_array).mean() / 32768.0
 
-            if amplitude < self.silence_threshold:
-                self._silence_frames += 1
+                if amplitude < self.silence_threshold:
+                    self._silence_frames += 1
+                else:
+                    self._silence_frames = 0
+
+                # Check if we've had enough silence to segment
+                frames_for_duration = int(self.silence_duration * self.sample_rate / max(len(audio_chunk), 1))
+                if self._silence_frames >= frames_for_duration and len(self._buffer) > 1:
+                    complete_audio = b"".join(self._buffer)
+                    self._buffer.clear()
+                    self._silence_frames = 0
+                    return complete_audio
             else:
-                self._silence_frames = 0
+                # Compressed audio — use chunk-count-based buffering
+                if len(self._buffer) >= 12:  # ~3 seconds at 250ms chunks
+                    complete_audio = b"".join(self._buffer)
+                    self._buffer.clear()
+                    return complete_audio
 
-            # Check if we've had enough silence to segment
-            frames_for_duration = int(self.silence_duration * self.sample_rate / len(audio_chunk))
-            if self._silence_frames >= frames_for_duration and len(self._buffer) > 1:
-                # Return buffered audio and reset
-                complete_audio = b"".join(self._buffer)
-                self._buffer.clear()
-                self._silence_frames = 0
-                return complete_audio
-
-        except ImportError:
-            # Without numpy, just buffer and return periodically
-            if len(self._buffer) >= 50:  # ~3 seconds at typical chunk size
+        except (ImportError, ValueError):
+            # Fallback: buffer and return periodically
+            if len(self._buffer) >= 12:  # ~3 seconds at 250ms chunks
                 complete_audio = b"".join(self._buffer)
                 self._buffer.clear()
                 return complete_audio
