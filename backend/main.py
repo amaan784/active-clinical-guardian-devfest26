@@ -329,6 +329,7 @@ async def end_consult(session_id: str):
         "end_time": datetime.now(),
         "transcript": agent.get_full_transcript(),
         "soap_note": json.dumps(soap_note.model_dump()),
+        "safety_alerts": json.dumps([sc.model_dump() for sc in agent.session.safety_checks]),
         "billing_info": json.dumps(billing_response.model_dump()),
     })
 
@@ -512,11 +513,35 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
                         patient_context=ws_patient_context,
                     )
                     soap_note = await agent.end_consult(soap_data=ws_soap_dict)
+
+                    # Generate billing
+                    ws_duration = datetime.now() - agent.session.start_time
+                    ws_duration_minutes = int(ws_duration.total_seconds() / 60)
+                    ws_billing = await flowglad_service.process_end_of_visit(
+                        session_id=session_id,
+                        patient_id=agent.patient_id,
+                        provider_id=agent.provider_id,
+                        soap_note=soap_note,
+                        duration_minutes=ws_duration_minutes,
+                        safety_alerts_count=len(agent.session.safety_checks),
+                    )
+
                     await websocket.send_json({
                         "type": "consult_ended",
                         "soap_note": soap_note.model_dump(),
+                        "billing": {
+                            "invoice_id": ws_billing.invoice_id,
+                            "amount": ws_billing.total_amount,
+                            "status": ws_billing.status,
+                        },
+                        "duration_minutes": ws_duration_minutes,
                         "timestamp": datetime.now().isoformat(),
                     })
+
+                    # Remove from active sessions
+                    if session_id in active_sessions:
+                        del active_sessions[session_id]
+
                     break
 
                 elif msg_type == "check_safety":

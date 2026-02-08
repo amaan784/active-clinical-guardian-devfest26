@@ -141,8 +141,9 @@ class ClinicalAgent:
         self.session.start_time = datetime.now()
         self._set_state(AgentState.LISTENING)
 
-        # Start the background safety check loop
-        self._safety_check_task = asyncio.create_task(self._safety_check_loop())
+        # Safety check loop is managed externally by the WebSocket handler
+        # in main.py, which calls the full orchestrated pipeline
+        # (Dedalus → Snowflake RAG → K2 Think)
 
         logger.info(f"Consult started: {self.session_id}")
 
@@ -170,14 +171,6 @@ class ClinicalAgent:
         """
         if self._state == AgentState.COMPLETED:
             return self.session.soap_note
-
-        # Cancel safety check loop
-        if self._safety_check_task:
-            self._safety_check_task.cancel()
-            try:
-                await self._safety_check_task
-            except asyncio.CancelledError:
-                pass
 
         self._set_state(AgentState.FINALIZING)
 

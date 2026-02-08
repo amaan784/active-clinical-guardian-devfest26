@@ -4,8 +4,8 @@ All data models for the clinical safety system
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional
-from datetime import datetime
+from typing import Optional, Union
+from datetime import datetime, date
 from enum import Enum
 
 
@@ -31,7 +31,7 @@ class PatientData(BaseModel):
     """Complete patient record from Snowflake"""
     patient_id: str
     name: str
-    date_of_birth: datetime
+    date_of_birth: Union[date, datetime]
     allergies: list[str] = Field(default_factory=list)
     current_medications: list[Medication] = Field(default_factory=list)
     medical_history: list[str] = Field(default_factory=list)
