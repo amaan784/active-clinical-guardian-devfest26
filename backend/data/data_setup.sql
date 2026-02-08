@@ -1,7 +1,12 @@
 -- ============================================================
--- Synapse 2.0 - Snowflake Setup Script
+-- Snowflake Setup Script
 -- Run this entire script in a Snowflake SQL Worksheet
 -- ============================================================
+
+USE ROLE ACCOUNTADMIN;
+USE DATABASE SYNAPSE_DB;
+USE SCHEMA PUBLIC;
+USE WAREHOUSE COMPUTE_WH;
 
 -- STEP 1: Create database, schema, and warehouse
 CREATE DATABASE IF NOT EXISTS SYNAPSE_DB;
@@ -110,36 +115,52 @@ VALUES
 -- ============================================================
 -- STEP 6: Insert clinical guidelines for RAG search
 -- ============================================================
-INSERT INTO CLINICAL_GUIDELINES (SOURCE, TITLE, CONTENT)
-VALUES
-    ('FDA Drug Safety Communication',
-     'Serotonin Syndrome Warning - Triptans with SSRIs/SNRIs',
-     'Concurrent use of triptans (e.g., sumatriptan, rizatriptan) with SSRIs or SNRIs may result in serotonin syndrome. Symptoms include agitation, hallucinations, rapid heartbeat, fever, muscle stiffness, and loss of coordination. Healthcare providers should carefully weigh the potential risk of serotonin syndrome against the expected benefit of treatment. If treatment is warranted, patients should be observed for serotonin syndrome symptoms, particularly during treatment initiation and dose increases.');
 
+-- A. Standard Safety Warnings
 INSERT INTO CLINICAL_GUIDELINES (SOURCE, TITLE, CONTENT)
-VALUES
-    ('Clinical Pharmacology Guidelines',
-     'SSRI Drug Interaction Profile',
-     'Selective serotonin reuptake inhibitors (SSRIs) including sertraline, fluoxetine, and paroxetine can interact with numerous medications. Key interactions include: MAO inhibitors (contraindicated - life threatening serotonin syndrome), triptans (serotonin syndrome risk), anticoagulants (increased bleeding risk via platelet inhibition), and NSAIDs (additive GI bleeding risk). A 14-day washout period is required when switching between SSRIs and MAOIs.');
+VALUES 
+    ('FDA Drug Safety', 'Serotonin Syndrome - Triptans + SSRIs', 
+     'Concurrent use of triptans (sumatriptan, rizatriptan) with SSRIs (sertraline, fluoxetine) may result in life-threatening serotonin syndrome. Symptoms: agitation, rapid heartbeat, fever, muscle rigidity, and coordination loss.'),
+    
+    ('Clinical Pharmacology', 'SSRI Drug Interactions', 
+     'SSRIs (sertraline, fluoxetine) interact with: MAO inhibitors, triptans (serotonin risk), anticoagulants (bleeding risk), and NSAIDs (GI bleeding risk).'),
+    
+    ('FDA Drug Safety', 'Anticoagulant + NSAID Warning', 
+     'Concurrent use of anticoagulants (warfarin) with NSAIDs (ibuprofen, naproxen, aspirin) significantly increases risk of GI bleeding. Recommend Acetaminophen (Tylenol) as first-line analgesic.');
 
+-- B. FDA Specific Label Data (Zoloft)
 INSERT INTO CLINICAL_GUIDELINES (SOURCE, TITLE, CONTENT)
-VALUES
-    ('Migraine Treatment Protocol',
-     'Triptan Prescribing Guidelines for Patients on Serotonergic Medications',
-     'When prescribing triptans for migraine, verify patient is not taking serotonergic medications. Alternative treatments for patients on SSRIs include: gepants (ubrogepant, rimegepant), NSAIDs, or combination acetaminophen/caffeine. If triptan use is clinically necessary in a patient on an SSRI, use the lowest effective dose and monitor closely for serotonin syndrome symptoms for 24 hours.');
+VALUES 
+    ('FDA Zoloft Label', 'Zoloft Serotonin Warning', 
+     'Serotonin Syndrome reported with Zoloft, particularly with concomitant use of triptans, fentanyl, and St. John''s Wort. Monitor for mental status changes and autonomic instability.'),
+    
+    ('FDA Zoloft Label', 'Zoloft Bleeding Warning', 
+     'Increased bleeding risk with Zoloft. Concomitant use of aspirin, NSAIDs, warfarin, and other anticoagulants may add to this risk. Range from ecchymoses to life-threatening hemorrhages.');
 
+-- C. General Knowledge (Drug Classes & Symptoms)
 INSERT INTO CLINICAL_GUIDELINES (SOURCE, TITLE, CONTENT)
-VALUES
-    ('FDA Drug Safety Communication',
-     'Anticoagulant-NSAID Interaction Warning',
-     'Concurrent use of anticoagulants (warfarin, heparin, direct oral anticoagulants) with NSAIDs (ibuprofen, naproxen, aspirin) significantly increases the risk of gastrointestinal and other bleeding events. NSAIDs inhibit platelet function and can cause gastric mucosal damage, compounding the bleeding risk from anticoagulation. Recommend acetaminophen as first-line analgesic for patients on anticoagulants. If NSAID use is unavoidable, co-prescribe a proton pump inhibitor and monitor INR closely.');
+VALUES 
+    ('NLM Drug Classes', 'SSRI List', 
+     'SSRI Class includes: Sertraline (Zoloft), Fluoxetine (Prozac), Citalopram (Celexa), Escitalopram (Lexapro). All share interaction profiles.'),
+    
+    ('NLM Drug Classes', 'Triptan List', 
+     'Triptan Class includes: Sumatriptan (Imitrex), Rizatriptan (Maxalt), Zolmitriptan (Zomig). Used for migraine.'),
+    
+    ('Clinical Ref', 'Serotonin Syndrome Symptoms', 
+     'Key symptoms: Agitation, confusion, tachycardia, dilated pupils, muscle twitching/rigidity, heavy sweating, diarrhea.');
 
+-- D. OTC Medication Logic (Safe vs Unsafe)
 INSERT INTO CLINICAL_GUIDELINES (SOURCE, TITLE, CONTENT)
-VALUES
-    ('ACC/AHA Clinical Guidelines',
-     'Anticoagulation Management in Atrial Fibrillation',
-     'Patients with atrial fibrillation on chronic anticoagulation therapy require careful medication management. Avoid concurrent NSAIDs, monitor for drug interactions with new prescriptions. Warfarin patients should maintain stable vitamin K intake and have regular INR monitoring. When adding new medications, check for CYP2C9 and CYP3A4 interactions that may potentiate or reduce anticoagulant effect.');
-
+VALUES 
+    ('OTC Safety', 'Ibuprofen (Advil/Motrin) Risk', 
+     'Ibuprofen is an NSAID. DANGER: Significant GI bleeding risk when combined with SSRIs or Anticoagulants. Avoid in these patients.'),
+    
+    ('OTC Safety', 'Naproxen (Aleve) Risk', 
+     'Naproxen is a long-acting NSAID. DANGER: Increases bleeding time. Contraindicated with SSRIs or Blood Thinners.'),
+    
+    ('OTC Safety', 'Acetaminophen (Tylenol) Safety', 
+     'Acetaminophen (Tylenol) is not an NSAID. It is the SAFE preferred analgesic for patients on SSRIs or Blood Thinners.');
+     
 -- ============================================================
 -- STEP 7: Generate embeddings for clinical guidelines
 -- This uses Cortex AI to create vector embeddings for RAG search
@@ -166,10 +187,12 @@ SELECT ID, TITLE, EMBEDDING IS NOT NULL AS HAS_EMBEDDING FROM CLINICAL_GUIDELINE
 SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', 'Say hello in one sentence') AS TEST_RESPONSE;
 
 -- Test vector search is working
-SELECT TITLE, VECTOR_COSINE_SIMILARITY(
+SELECT
+  TITLE,
+  VECTOR_COSINE_SIMILARITY(
     EMBEDDING,
     SNOWFLAKE.CORTEX.EMBED_TEXT_768('e5-base-v2', 'serotonin syndrome triptan SSRI interaction')
-) AS RELEVANCE
+  ) AS RELEVANCE
 FROM CLINICAL_GUIDELINES
 ORDER BY RELEVANCE DESC
 LIMIT 3;
