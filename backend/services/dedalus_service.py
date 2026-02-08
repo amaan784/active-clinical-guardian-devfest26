@@ -2,12 +2,12 @@
 Synapse 2.0 Dedalus Labs Service
 Agent orchestration using Dedalus SDK and DedalusRunner
 
-Reference: https://github.com/dedalus-labs/dedalus-sdk-python
+Reference: https://docs.dedaluslabs.ai
 """
 
 import logging
-from typing import Optional, Any
 import json
+from typing import Optional, AsyncGenerator
 
 from config import get_settings
 
@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 
 # Conditional import for Dedalus SDK
 try:
-    from dedalus_labs import AsyncDedalus
+    from dedalus_labs import AsyncDedalus, DedalusRunner
+    from dedalus_labs.utils.stream import stream_async
     DEDALUS_AVAILABLE = True
 except ImportError:
     DEDALUS_AVAILABLE = False
@@ -26,7 +27,7 @@ class DedalusService:
     """
     Dedalus Labs integration for agent orchestration
 
-    Uses the Dedalus SDK to:
+    Uses the Dedalus SDK with DedalusRunner to:
     - Orchestrate multi-step clinical workflows
     - Route to different LLM providers
     - Connect to MCP tools for enhanced capabilities
@@ -36,9 +37,10 @@ class DedalusService:
     def __init__(self):
         self.settings = get_settings()
         self._client: Optional[AsyncDedalus] = None
+        self._runner: Optional[DedalusRunner] = None
 
     async def initialize(self) -> bool:
-        """Initialize the Dedalus client"""
+        """Initialize the Dedalus client and runner"""
         if not DEDALUS_AVAILABLE:
             logger.warning("Dedalus SDK not available, using local orchestration")
             return True
@@ -50,9 +52,9 @@ class DedalusService:
         try:
             self._client = AsyncDedalus(
                 api_key=self.settings.dedalus_api_key,
-                environment=self.settings.dedalus_environment,
             )
-            logger.info("Dedalus client initialized successfully")
+            self._runner = DedalusRunner(self._client)
+            logger.info("Dedalus client and runner initialized successfully")
             return True
         except Exception as e:
             logger.error(f"Failed to initialize Dedalus client: {e}")
@@ -69,7 +71,7 @@ class DedalusService:
         patient_context: dict,
     ) -> dict:
         """
-        Generate a SOAP note from transcript using Dedalus
+        Generate a SOAP note from transcript using Dedalus DedalusRunner
 
         Args:
             transcript: Full encounter transcript
@@ -78,7 +80,7 @@ class DedalusService:
         Returns:
             Structured SOAP note
         """
-        if not self._client:
+        if not self._runner:
             # Fallback to local generation
             return self._generate_soap_local(transcript, patient_context)
 
@@ -99,27 +101,24 @@ Generate a JSON response with this structure:
     "plan": "treatment plan and follow-up",
     "icd10_codes": ["list of applicable ICD-10 codes"],
     "cpt_codes": ["list of applicable CPT codes"]
-}}"""
+}}
 
-            response = await self._client.chat.completions.create(
-                model="anthropic/claude-3.5-sonnet",  # Or any available model
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a medical documentation specialist. Generate accurate, concise SOAP notes in JSON format."
-                    },
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                max_tokens=2048,
+IMPORTANT: Return ONLY the JSON object, no other text."""
+
+            response = await self._runner.run(
+                input=prompt,
+                model=["anthropic/claude-3.5-sonnet"],
+                instructions="You are a medical documentation specialist. Generate accurate, concise SOAP notes. Always respond with valid JSON only.",
+                stream=False,
             )
 
-            content = response.choices[0].message.content
-            # Parse JSON from response
-            import re
-            json_match = re.search(r'\{[\s\S]*\}', content)
-            if json_match:
-                return json.loads(json_match.group())
+            # Extract content from runner response
+            content = self._extract_response_text(response)
+            if content:
+                import re
+                json_match = re.search(r'\{[\s\S]*\}', content)
+                if json_match:
+                    return json.loads(json_match.group())
 
             return self._generate_soap_local(transcript, patient_context)
 
@@ -151,33 +150,31 @@ Generate a JSON response with this structure:
         Returns:
             Dict with extracted medications, procedures, diagnoses
         """
-        if not self._client:
+        if not self._runner:
             return {"medications": [], "procedures": [], "diagnoses": []}
 
         try:
-            response = await self._client.chat.completions.create(
-                model="anthropic/claude-3.5-sonnet",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": """Extract clinical intent from the transcript. Return JSON:
-{
-    "medications": [{"name": "drug", "dosage": "amount", "action": "prescribe|discuss|discontinue"}],
-    "procedures": [{"name": "procedure", "action": "order|discuss"}],
-    "diagnoses": [{"name": "condition", "icd10": "code if known"}]
-}"""
-                    },
-                    {"role": "user", "content": transcript_segment}
-                ],
-                temperature=0.1,
-                max_tokens=1024,
+            response = await self._runner.run(
+                input=f"""Extract clinical intent from this transcript segment. Return JSON only:
+{{
+    "medications": [{{"name": "drug", "dosage": "amount", "action": "prescribe|discuss|discontinue"}}],
+    "procedures": [{{"name": "procedure", "action": "order|discuss"}}],
+    "diagnoses": [{{"name": "condition", "icd10": "code if known"}}]
+}}
+
+Transcript segment:
+{transcript_segment}""",
+                model=["anthropic/claude-3.5-sonnet"],
+                instructions="Extract clinical intent from medical transcripts. Always respond with valid JSON only.",
+                stream=False,
             )
 
-            content = response.choices[0].message.content
-            import re
-            json_match = re.search(r'\{[\s\S]*\}', content)
-            if json_match:
-                return json.loads(json_match.group())
+            content = self._extract_response_text(response)
+            if content:
+                import re
+                json_match = re.search(r'\{[\s\S]*\}', content)
+                if json_match:
+                    return json.loads(json_match.group())
 
         except Exception as e:
             logger.error(f"Clinical intent analysis error: {e}")
@@ -188,9 +185,9 @@ Generate a JSON response with this structure:
         self,
         prompt: str,
         system_prompt: str = "You are a helpful clinical assistant.",
-    ):
+    ) -> AsyncGenerator[str, None]:
         """
-        Stream a response from Dedalus
+        Stream a response from Dedalus using DedalusRunner
 
         Args:
             prompt: User prompt
@@ -199,24 +196,50 @@ Generate a JSON response with this structure:
         Yields:
             Response chunks
         """
-        if not self._client:
+        if not self._runner:
             yield "Dedalus not configured. Using local mode."
             return
 
         try:
-            stream = await self._client.chat.completions.create(
-                model="anthropic/claude-3.5-sonnet",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
+            response = await self._runner.run(
+                input=prompt,
+                model=["anthropic/claude-3.5-sonnet"],
+                instructions=system_prompt,
                 stream=True,
             )
 
-            async for chunk in stream:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
+            async for chunk in stream_async(response):
+                yield chunk
 
         except Exception as e:
             logger.error(f"Dedalus streaming error: {e}")
             yield f"Error: {str(e)}"
+
+    def _extract_response_text(self, response) -> Optional[str]:
+        """
+        Extract text content from a DedalusRunner response.
+
+        The runner may return different response formats depending on
+        the model and configuration. This method handles the common cases.
+        """
+        if response is None:
+            return None
+
+        # If it's already a string, return directly
+        if isinstance(response, str):
+            return response
+
+        # If it has an output attribute (common runner response)
+        if hasattr(response, 'output'):
+            return str(response.output)
+
+        # If it has a content attribute
+        if hasattr(response, 'content'):
+            return str(response.content)
+
+        # If it's dict-like with an output or content key
+        if isinstance(response, dict):
+            return response.get('output') or response.get('content') or str(response)
+
+        # Last resort: stringify it
+        return str(response)

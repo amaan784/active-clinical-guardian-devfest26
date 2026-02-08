@@ -152,7 +152,28 @@ export function SessionSummary({ data, onClose }: SessionSummaryProps) {
 
             {/* Actions */}
             <div className="flex gap-2">
-              <Button className="flex-1">
+              <Button
+                className="flex-1"
+                onClick={() => {
+                  const exportData = {
+                    session_id: data.session_id,
+                    duration_minutes,
+                    soap_note,
+                    billing,
+                    exported_at: new Date().toISOString(),
+                  }
+                  const blob = new Blob(
+                    [JSON.stringify(exportData, null, 2)],
+                    { type: "application/json" }
+                  )
+                  const url = URL.createObjectURL(blob)
+                  const a = document.createElement("a")
+                  a.href = url
+                  a.download = `synapse-note-${data.session_id.slice(0, 8)}.json`
+                  a.click()
+                  URL.revokeObjectURL(url)
+                }}
+              >
                 <Download className="h-4 w-4 mr-2" />
                 Export Note
               </Button>

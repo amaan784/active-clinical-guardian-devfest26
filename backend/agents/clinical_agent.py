@@ -141,8 +141,9 @@ class ClinicalAgent:
         self.session.start_time = datetime.now()
         self._set_state(AgentState.LISTENING)
 
-        # Start the background safety check loop
-        self._safety_check_task = asyncio.create_task(self._safety_check_loop())
+        # Safety check loop is managed externally by the WebSocket handler
+        # in main.py, which calls the full orchestrated pipeline
+        # (Dedalus → Snowflake RAG → K2 Think)
 
         logger.info(f"Consult started: {self.session_id}")
 
@@ -160,23 +161,32 @@ class ClinicalAgent:
 
         self._set_state(AgentState.LISTENING)
 
-    async def end_consult(self) -> SOAPNote:
-        """End the consultation and generate final documentation"""
+    async def end_consult(self, soap_data: Optional[dict] = None) -> SOAPNote:
+        """
+        End the consultation and generate final documentation
+
+        Args:
+            soap_data: Optional pre-generated SOAP note dict from Dedalus.
+                       If None, uses local fallback generation.
+        """
         if self._state == AgentState.COMPLETED:
             return self.session.soap_note
 
-        # Cancel safety check loop
-        if self._safety_check_task:
-            self._safety_check_task.cancel()
-            try:
-                await self._safety_check_task
-            except asyncio.CancelledError:
-                pass
-
         self._set_state(AgentState.FINALIZING)
 
-        # Generate SOAP note from transcript
-        soap_note = await self._generate_soap_note()
+        # Use externally generated SOAP note if provided, otherwise fallback
+        if soap_data:
+            soap_note = SOAPNote(
+                subjective=soap_data.get("subjective", ""),
+                objective=soap_data.get("objective", ""),
+                assessment=soap_data.get("assessment", ""),
+                plan=soap_data.get("plan", ""),
+                icd10_codes=soap_data.get("icd10_codes", []),
+                cpt_codes=soap_data.get("cpt_codes", ["99214"]),
+            )
+        else:
+            soap_note = await self._generate_soap_note()
+
         self.session.soap_note = soap_note
         self.session.end_time = datetime.now()
         self.session.status = "completed"

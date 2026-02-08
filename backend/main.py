@@ -24,6 +24,7 @@ from agents.clinical_agent import ClinicalAgent, AgentState
 from services.snowflake_service import SnowflakeService
 from services.k2_service import K2SafetyService
 from services.elevenlabs_service import ElevenLabsService, AudioStreamProcessor
+from services.dedalus_service import DedalusService
 from services.flowglad_service import FlowgladService
 from models.schemas import SafetyCheckResult, PatientData
 
@@ -38,6 +39,7 @@ logger = logging.getLogger(__name__)
 snowflake_service: Optional[SnowflakeService] = None
 k2_service: Optional[K2SafetyService] = None
 elevenlabs_service: Optional[ElevenLabsService] = None
+dedalus_service: Optional[DedalusService] = None
 flowglad_service: Optional[FlowgladService] = None
 
 # Active sessions tracking
@@ -47,7 +49,7 @@ active_sessions: dict[str, ClinicalAgent] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan management"""
-    global snowflake_service, k2_service, elevenlabs_service, flowglad_service
+    global snowflake_service, k2_service, elevenlabs_service, dedalus_service, flowglad_service
 
     # Startup
     logger.info("Initializing Synapse 2.0 services...")
@@ -60,6 +62,9 @@ async def lifespan(app: FastAPI):
 
     elevenlabs_service = ElevenLabsService()
     await elevenlabs_service.initialize()
+
+    dedalus_service = DedalusService()
+    await dedalus_service.initialize()
 
     flowglad_service = FlowgladService()
     await flowglad_service.initialize()
@@ -77,6 +82,8 @@ async def lifespan(app: FastAPI):
         await k2_service.close()
     if elevenlabs_service:
         await elevenlabs_service.close()
+    if dedalus_service:
+        await dedalus_service.close()
     if flowglad_service:
         await flowglad_service.close()
 
@@ -125,6 +132,60 @@ class EndConsultResponse(BaseModel):
     soap_note: dict
     billing: dict
     duration_minutes: int
+
+
+# --- Orchestrated Safety Pipeline ---
+# Dedalus sits at the center of every safety check:
+#   1. Dedalus: analyze_clinical_intent → extract medications, procedures, diagnoses
+#   2. Snowflake RAG: search guidelines using targeted query from Dedalus output
+#   3. K2 Think: reason over patient data + guidelines + Dedalus intent
+#   4. ElevenLabs: voice interruption if DANGER/CRITICAL
+
+async def orchestrate_safety_check(
+    transcript_text: str,
+    agent: ClinicalAgent,
+) -> SafetyCheckResult:
+    """
+    Full orchestrated safety check pipeline with Dedalus as the coordinator.
+
+    This is the core loop that runs every safety_check_interval seconds.
+    """
+    patient_data = agent.patient_data
+
+    # ── Step 1: Dedalus extracts clinical intent ──
+    # Instead of dumping raw transcript to RAG, Dedalus parses what the doctor
+    # is actually doing: prescribing, ordering, diagnosing
+    intent = await dedalus_service.analyze_clinical_intent(transcript_text)
+
+    # ── Step 2: Build targeted RAG query from Dedalus output ──
+    # Use the extracted medications + patient's current meds to form a precise
+    # search query instead of the raw transcript blob
+    med_names = [m.get("name", "") for m in intent.get("medications", [])]
+    current_med_names = [m.name for m in patient_data.current_medications]
+    current_classes = [m.drug_class for m in patient_data.current_medications if m.drug_class]
+
+    if med_names:
+        # Targeted query: "sumatriptan sertraline SSRI interaction safety"
+        rag_query = " ".join(med_names + current_med_names + current_classes + ["interaction", "safety"])
+        logger.info(f"Dedalus extracted medications: {med_names} → RAG query: {rag_query}")
+    else:
+        # Fallback: use raw transcript if Dedalus didn't find anything
+        rag_query = transcript_text
+        logger.info("No medications extracted by Dedalus, using raw transcript for RAG")
+
+    # ── Step 3: Snowflake RAG search with targeted query ──
+    guidelines = await snowflake_service.search_clinical_guidelines(
+        query=rag_query, limit=3,
+    )
+
+    # ── Step 4: K2 Think reasons over the full context ──
+    result = await k2_service.check_safety(
+        transcript_text=transcript_text,
+        patient_data=patient_data,
+        clinical_guidelines=guidelines,
+    )
+
+    return result
 
 
 # --- REST Endpoints ---
@@ -212,11 +273,8 @@ async def trigger_safety_check(session_id: str):
     if not transcript_buffer:
         return {"status": "no_content", "message": "No transcript to check"}
 
-    # Run safety check
-    result = await k2_service.check_safety(
-        transcript_text=transcript_buffer,
-        patient_data=agent.patient_data,
-    )
+    # Run orchestrated safety pipeline (Dedalus → Snowflake RAG → K2)
+    result = await orchestrate_safety_check(transcript_buffer, agent)
 
     # Process the result through the agent
     await agent.process_safety_result(result)
@@ -236,12 +294,21 @@ async def end_consult(session_id: str):
     if not agent:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # End the consultation
-    soap_note = await agent.end_consult()
-
     # Calculate duration
     duration = datetime.now() - agent.session.start_time
     duration_minutes = int(duration.total_seconds() / 60)
+
+    # Generate SOAP note via Dedalus (or fallback)
+    patient_context = agent.patient_data.model_dump() if agent.patient_data else {}
+    full_transcript = agent.get_full_transcript()
+
+    soap_dict = await dedalus_service.generate_soap_note(
+        transcript=full_transcript,
+        patient_context=patient_context,
+    )
+
+    # End the consultation with the generated SOAP note
+    soap_note = await agent.end_consult(soap_data=soap_dict)
 
     # Generate billing
     billing_response = await flowglad_service.process_end_of_visit(
@@ -262,6 +329,7 @@ async def end_consult(session_id: str):
         "end_time": datetime.now(),
         "transcript": agent.get_full_transcript(),
         "soap_note": json.dumps(soap_note.model_dump()),
+        "safety_alerts": json.dumps([sc.model_dump() for sc in agent.session.safety_checks]),
         "billing_info": json.dumps(billing_response.model_dump()),
     })
 
@@ -374,10 +442,7 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
             if agent.state == AgentState.LISTENING and agent._transcript_buffer:
                 buffer_text = agent.get_transcript_buffer()
                 if buffer_text.strip():
-                    result = await k2_service.check_safety(
-                        transcript_text=buffer_text,
-                        patient_data=agent.patient_data,
-                    )
+                    result = await orchestrate_safety_check(buffer_text, agent)
                     await agent.process_safety_result(result)
                     agent.clear_transcript_buffer()
 
@@ -413,15 +478,25 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
 
                 if msg_type == "transcript":
                     # Direct transcript input (for demo/testing)
-                    await agent.add_transcript(
-                        data.get("text", ""),
-                        data.get("speaker", "doctor")
-                    )
+                    text = data.get("text", "")
+                    speaker = data.get("speaker", "doctor")
+                    await agent.add_transcript(text, speaker)
                     await websocket.send_json({
                         "type": "transcript_added",
-                        "text": data.get("text"),
+                        "text": text,
                         "timestamp": datetime.now().isoformat(),
                     })
+
+                    # Run Dedalus intent analysis on doctor speech in background
+                    # so the frontend can display what was detected
+                    if speaker == "doctor" and text.strip():
+                        intent = await dedalus_service.analyze_clinical_intent(text)
+                        if intent.get("medications") or intent.get("procedures") or intent.get("diagnoses"):
+                            await websocket.send_json({
+                                "type": "clinical_intent",
+                                "intent": intent,
+                                "timestamp": datetime.now().isoformat(),
+                            })
 
                 elif msg_type == "pause":
                     await agent.pause_consult()
@@ -430,22 +505,50 @@ async def websocket_consult(websocket: WebSocket, session_id: str):
                     await agent.resume_consult()
 
                 elif msg_type == "end":
-                    soap_note = await agent.end_consult()
+                    # Generate SOAP note via Dedalus before ending
+                    ws_patient_context = agent.patient_data.model_dump() if agent.patient_data else {}
+                    ws_transcript = agent.get_full_transcript()
+                    ws_soap_dict = await dedalus_service.generate_soap_note(
+                        transcript=ws_transcript,
+                        patient_context=ws_patient_context,
+                    )
+                    soap_note = await agent.end_consult(soap_data=ws_soap_dict)
+
+                    # Generate billing
+                    ws_duration = datetime.now() - agent.session.start_time
+                    ws_duration_minutes = int(ws_duration.total_seconds() / 60)
+                    ws_billing = await flowglad_service.process_end_of_visit(
+                        session_id=session_id,
+                        patient_id=agent.patient_id,
+                        provider_id=agent.provider_id,
+                        soap_note=soap_note,
+                        duration_minutes=ws_duration_minutes,
+                        safety_alerts_count=len(agent.session.safety_checks),
+                    )
+
                     await websocket.send_json({
                         "type": "consult_ended",
                         "soap_note": soap_note.model_dump(),
+                        "billing": {
+                            "invoice_id": ws_billing.invoice_id,
+                            "amount": ws_billing.total_amount,
+                            "status": ws_billing.status,
+                        },
+                        "duration_minutes": ws_duration_minutes,
                         "timestamp": datetime.now().isoformat(),
                     })
+
+                    # Remove from active sessions
+                    if session_id in active_sessions:
+                        del active_sessions[session_id]
+
                     break
 
                 elif msg_type == "check_safety":
                     # Manual safety check trigger
                     buffer_text = agent.get_transcript_buffer()
                     if buffer_text:
-                        result = await k2_service.check_safety(
-                            transcript_text=buffer_text,
-                            patient_data=agent.patient_data,
-                        )
+                        result = await orchestrate_safety_check(buffer_text, agent)
                         await agent.process_safety_result(result)
 
     except WebSocketDisconnect:
@@ -509,11 +612,8 @@ async def simulate_danger(session_id: str, drug_name: str = "sumatriptan"):
     demo_text = f"I'm going to prescribe {drug_name} 50mg for your migraine."
     await agent.add_transcript(demo_text)
 
-    # Trigger safety check
-    result = await k2_service.check_safety(
-        transcript_text=demo_text,
-        patient_data=agent.patient_data,
-    )
+    # Run orchestrated safety pipeline (Dedalus → Snowflake RAG → K2)
+    result = await orchestrate_safety_check(demo_text, agent)
 
     await agent.process_safety_result(result)
 

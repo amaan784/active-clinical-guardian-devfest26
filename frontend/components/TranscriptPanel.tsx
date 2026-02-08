@@ -25,7 +25,7 @@ export function TranscriptPanel({ entries, isRecording }: TranscriptPanelProps) 
   // Auto-scroll to bottom when new entries arrive
   useEffect(() => {
     if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+      scrollRef.current.scrollIntoView({ behavior: "smooth" })
     }
   }, [entries])
 
@@ -49,7 +49,7 @@ export function TranscriptPanel({ entries, isRecording }: TranscriptPanelProps) 
         </div>
       </CardHeader>
       <CardContent>
-        <ScrollArea className="h-[400px] pr-4" ref={scrollRef}>
+        <ScrollArea className="h-[400px] pr-4">
           {entries.length === 0 ? (
             <div className="flex items-center justify-center h-full text-muted-foreground">
               <p>Transcript will appear here...</p>
@@ -84,6 +84,7 @@ export function TranscriptPanel({ entries, isRecording }: TranscriptPanelProps) 
                   <p className="text-sm pl-1">{entry.text}</p>
                 </div>
               ))}
+              <div ref={scrollRef} />
             </div>
           )}
         </ScrollArea>

@@ -2,8 +2,8 @@
 Synapse 2.0 K2 Think Safety Service
 System 2 reasoning for drug interaction validation using K2-Think-V2
 
-K2 Think is accessed via OpenAI-compatible API (vLLM or hosted endpoint)
-Reference: https://huggingface.co/LLM360/K2-Think-V2
+K2 Think is accessed via OpenAI-compatible API hosted at api.k2think.ai
+Reference: https://api.k2think.ai/v1/chat/completions
 """
 
 import logging
@@ -105,11 +105,15 @@ PATIENT INFORMATION:
 DOCTOR'S STATEMENT:
 "{transcript}"
 
+RELEVANT CLINICAL GUIDELINES:
+{guidelines_text}
+
 TASK:
 1. Identify any medications mentioned in the doctor's statement
 2. Check for dangerous drug-drug interactions with current medications
 3. Check for allergy contraindications
-4. Assess overall safety risk
+4. Cross-reference with the clinical guidelines above
+5. Assess overall safety risk
 
 Respond in JSON format:
 {{
@@ -165,9 +169,13 @@ class K2SafetyService:
             logger.info("K2 base URL not configured, using rule-based fallback")
             return
 
+        if not self.settings.k2_api_key:
+            logger.info("K2 API key not configured, using rule-based fallback")
+            return
+
         try:
             self._client = AsyncOpenAI(
-                api_key=self.settings.k2_api_key or "not-needed",  # vLLM may not need key
+                api_key=self.settings.k2_api_key,
                 base_url=self.settings.k2_base_url,
             )
             self._use_k2 = True
@@ -254,6 +262,7 @@ class K2SafetyService:
         self,
         transcript_text: str,
         patient_data: PatientData,
+        clinical_guidelines: Optional[list[dict]] = None,
     ) -> Optional[dict]:
         """Use K2 Think for advanced reasoning"""
         if not self._client or not self._use_k2:
@@ -267,14 +276,24 @@ class K2SafetyService:
             allergies = ", ".join(patient_data.allergies) or "None"
             history = ", ".join(patient_data.medical_history) or "None"
 
+            # Format clinical guidelines from Snowflake RAG
+            if clinical_guidelines:
+                guidelines_text = "\n".join(
+                    f"- [{g['source']}] {g['title']}: {g['content']}"
+                    for g in clinical_guidelines
+                )
+            else:
+                guidelines_text = "No specific guidelines retrieved."
+
             prompt = K2_SAFETY_PROMPT.format(
                 current_meds=current_meds,
                 allergies=allergies,
                 history=history,
                 transcript=transcript_text,
+                guidelines_text=guidelines_text,
             )
 
-            # Call K2 Think via OpenAI-compatible API
+            # Call K2 Think via hosted OpenAI-compatible API
             response = await self._client.chat.completions.create(
                 model=self.settings.k2_model,
                 messages=[
@@ -286,9 +305,6 @@ class K2SafetyService:
                 ],
                 temperature=1.0,
                 max_tokens=2048,
-                extra_body={
-                    "chat_template_kwargs": {"reasoning_effort": "high"},
-                },
             )
 
             # Parse the response
@@ -329,7 +345,7 @@ class K2SafetyService:
 
         # Try K2 Think first for advanced reasoning
         if self._use_k2:
-            k2_result = await self._check_with_k2_think(transcript_text, patient_data)
+            k2_result = await self._check_with_k2_think(transcript_text, patient_data, clinical_guidelines)
             if k2_result:
                 logger.info("Using K2 Think reasoning result")
                 return SafetyCheckResult(
