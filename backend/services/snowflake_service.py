@@ -1,11 +1,17 @@
 """
 Synapse 2.0 Snowflake Cortex Service
-Handles patient data retrieval and RAG queries for clinical guidelines
+Patient data retrieval and RAG queries using Snowflake Cortex AI functions
+
+References:
+- https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-rest-api
+- https://docs.snowflake.com/en/user-guide/snowflake-cortex/aisql
 """
 
 import logging
 from typing import Optional
 from datetime import datetime
+import json
+import httpx
 
 from config import get_settings
 from models.schemas import PatientData, Medication
@@ -26,12 +32,19 @@ class SnowflakeService:
     """
     Snowflake Cortex integration for:
     - Patient history (structured SQL data)
-    - Clinical guidelines (vectorized PDFs via Cortex Search)
+    - Clinical guidelines RAG (Cortex AI functions)
+    - AI-powered text extraction and analysis
+
+    Uses Snowflake Cortex AI SQL functions:
+    - AI_COMPLETE: LLM text generation
+    - AI_EMBED: Text embeddings for similarity search
+    - AI_EXTRACT: Information extraction from documents
     """
 
     def __init__(self):
         self.settings = get_settings()
         self._connection = None
+        self._rest_client: Optional[httpx.AsyncClient] = None
 
         # Demo patient data for hackathon
         self._demo_patients = {
@@ -87,6 +100,10 @@ class SnowflakeService:
             logger.info("Using demo mode - Snowflake not connected")
             return True
 
+        if not self.settings.snowflake_account:
+            logger.info("Snowflake not configured, using demo mode")
+            return True
+
         try:
             self._connection = snowflake.connector.connect(
                 account=self.settings.snowflake_account,
@@ -96,6 +113,13 @@ class SnowflakeService:
                 schema=self.settings.snowflake_schema,
                 warehouse=self.settings.snowflake_warehouse,
             )
+
+            # Initialize REST client for Cortex API
+            self._rest_client = httpx.AsyncClient(
+                base_url=f"https://{self.settings.snowflake_account}.snowflakecomputing.com",
+                timeout=60.0,
+            )
+
             logger.info("Connected to Snowflake successfully")
             return True
         except Exception as e:
@@ -107,17 +131,12 @@ class SnowflakeService:
         if self._connection:
             self._connection.close()
             self._connection = None
+        if self._rest_client:
+            await self._rest_client.aclose()
+            self._rest_client = None
 
     async def get_patient_data(self, patient_id: str) -> Optional[PatientData]:
-        """
-        Retrieve patient data from Snowflake
-
-        Args:
-            patient_id: The patient identifier
-
-        Returns:
-            PatientData object or None if not found
-        """
+        """Retrieve patient data from Snowflake"""
         # Demo mode - return from local cache
         if patient_id in self._demo_patients:
             logger.info(f"Retrieved demo patient data for {patient_id}")
@@ -180,22 +199,79 @@ class SnowflakeService:
         patient = await self.get_patient_data(patient_id)
         return patient.current_medications if patient else []
 
+    async def cortex_complete(
+        self,
+        prompt: str,
+        model: str = "claude-3-5-sonnet",
+        max_tokens: int = 1024,
+        temperature: float = 0.7,
+    ) -> Optional[str]:
+        """
+        Use Snowflake Cortex AI_COMPLETE for LLM inference
+
+        REST API: POST /api/v2/cortex/inference:complete
+        SQL: SELECT AI_COMPLETE(model, prompt, options)
+        """
+        if not self._connection:
+            logger.info("Cortex not available, returning None")
+            return None
+
+        try:
+            cursor = self._connection.cursor()
+
+            # Use AI_COMPLETE SQL function
+            cursor.execute("""
+                SELECT SNOWFLAKE.CORTEX.AI_COMPLETE(
+                    %s,
+                    %s,
+                    {'max_tokens': %s, 'temperature': %s}
+                ) AS response
+            """, (model, prompt, max_tokens, temperature))
+
+            result = cursor.fetchone()
+            if result:
+                return result[0]
+            return None
+
+        except Exception as e:
+            logger.error(f"Cortex AI_COMPLETE error: {e}")
+            return None
+
+    async def cortex_embed(self, text: str, model: str = "e5-base-v2") -> Optional[list[float]]:
+        """
+        Create text embeddings using Snowflake Cortex AI_EMBED
+
+        REST API: POST /api/v2/cortex/inference:embed
+        SQL: SELECT AI_EMBED(model, text)
+        """
+        if not self._connection:
+            return None
+
+        try:
+            cursor = self._connection.cursor()
+
+            cursor.execute("""
+                SELECT SNOWFLAKE.CORTEX.AI_EMBED(%s, %s) AS embedding
+            """, (model, text))
+
+            result = cursor.fetchone()
+            if result:
+                return result[0]
+            return None
+
+        except Exception as e:
+            logger.error(f"Cortex AI_EMBED error: {e}")
+            return None
+
     async def search_clinical_guidelines(
         self,
         query: str,
         limit: int = 5
     ) -> list[dict]:
         """
-        Search clinical guidelines using Snowflake Cortex RAG
+        Search clinical guidelines using Snowflake Cortex
 
-        Uses Cortex Search to find relevant guidelines from vectorized PDFs
-
-        Args:
-            query: Natural language search query
-            limit: Maximum number of results
-
-        Returns:
-            List of relevant guideline excerpts
+        Uses AI_EMBED for semantic search over vectorized clinical PDFs
         """
         # Demo mode - return mock guideline data
         mock_guidelines = [
@@ -226,18 +302,23 @@ class SnowflakeService:
         try:
             cursor = self._connection.cursor(DictCursor)
 
-            # Use Cortex Search for semantic search
+            # Get query embedding
+            query_embedding = await self.cortex_embed(query)
+            if not query_embedding:
+                return mock_guidelines[:limit]
+
+            # Search using vector similarity
+            # Assumes CLINICAL_GUIDELINES table has EMBEDDING column
             cursor.execute("""
                 SELECT
-                    source,
-                    title,
-                    content,
-                    CORTEX_SEARCH_SCORE() as relevance_score
+                    SOURCE,
+                    TITLE,
+                    CONTENT,
+                    VECTOR_COSINE_SIMILARITY(EMBEDDING, %s::VECTOR) as RELEVANCE_SCORE
                 FROM CLINICAL_GUIDELINES
-                WHERE CORTEX_SEARCH(content, %s)
-                ORDER BY relevance_score DESC
+                ORDER BY RELEVANCE_SCORE DESC
                 LIMIT %s
-            """, (query, limit))
+            """, (json.dumps(query_embedding), limit))
 
             results = cursor.fetchall()
 
@@ -246,7 +327,7 @@ class SnowflakeService:
                     "source": row["SOURCE"],
                     "title": row["TITLE"],
                     "content": row["CONTENT"],
-                    "relevance_score": row["RELEVANCE_SCORE"],
+                    "relevance_score": float(row["RELEVANCE_SCORE"]),
                 }
                 for row in results
             ]
@@ -254,6 +335,40 @@ class SnowflakeService:
         except Exception as e:
             logger.error(f"Error searching guidelines: {e}")
             return mock_guidelines[:limit]
+
+    async def extract_medical_entities(self, text: str) -> dict:
+        """
+        Extract medical entities from text using Cortex AI_EXTRACT
+
+        Extracts medications, dosages, conditions, and procedures
+        """
+        if not self._connection:
+            return {"medications": [], "conditions": [], "procedures": []}
+
+        try:
+            cursor = self._connection.cursor()
+
+            prompt = f"""Extract medical entities from this clinical text.
+Return JSON with: medications (name, dosage), conditions, procedures.
+
+Text: {text}"""
+
+            cursor.execute("""
+                SELECT SNOWFLAKE.CORTEX.AI_EXTRACT(
+                    'claude-3-5-sonnet',
+                    %s,
+                    {'output_format': 'json'}
+                ) AS entities
+            """, (prompt,))
+
+            result = cursor.fetchone()
+            if result:
+                return json.loads(result[0])
+            return {"medications": [], "conditions": [], "procedures": []}
+
+        except Exception as e:
+            logger.error(f"Cortex AI_EXTRACT error: {e}")
+            return {"medications": [], "conditions": [], "procedures": []}
 
     async def save_session_record(self, session_data: dict) -> bool:
         """Save completed session to Snowflake for permanent record"""
@@ -284,3 +399,85 @@ class SnowflakeService:
         except Exception as e:
             logger.error(f"Error saving session: {e}")
             return False
+
+
+# SQL setup script for Snowflake tables
+SNOWFLAKE_SETUP_SQL = """
+-- Create database and schema
+CREATE DATABASE IF NOT EXISTS SYNAPSE_DB;
+USE DATABASE SYNAPSE_DB;
+CREATE SCHEMA IF NOT EXISTS PUBLIC;
+
+-- Patient data table
+CREATE TABLE IF NOT EXISTS PATIENT_DATA (
+    PATIENT_ID VARCHAR PRIMARY KEY,
+    NAME VARCHAR,
+    DATE_OF_BIRTH DATE,
+    MEDICAL_HISTORY VARCHAR,
+    RECENT_DIAGNOSES VARCHAR,
+    CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- Patient medications
+CREATE TABLE IF NOT EXISTS PATIENT_MEDICATIONS (
+    ID INTEGER AUTOINCREMENT PRIMARY KEY,
+    PATIENT_ID VARCHAR REFERENCES PATIENT_DATA(PATIENT_ID),
+    MEDICATION_NAME VARCHAR,
+    DOSAGE VARCHAR,
+    FREQUENCY VARCHAR,
+    DRUG_CLASS VARCHAR,
+    ACTIVE BOOLEAN DEFAULT TRUE,
+    START_DATE DATE,
+    PRESCRIBER VARCHAR
+);
+
+-- Patient allergies
+CREATE TABLE IF NOT EXISTS PATIENT_ALLERGIES (
+    ID INTEGER AUTOINCREMENT PRIMARY KEY,
+    PATIENT_ID VARCHAR REFERENCES PATIENT_DATA(PATIENT_ID),
+    ALLERGEN VARCHAR,
+    SEVERITY VARCHAR,
+    REACTION VARCHAR
+);
+
+-- Clinical guidelines with embeddings for RAG
+CREATE TABLE IF NOT EXISTS CLINICAL_GUIDELINES (
+    ID INTEGER AUTOINCREMENT PRIMARY KEY,
+    SOURCE VARCHAR,
+    TITLE VARCHAR,
+    CONTENT TEXT,
+    EMBEDDING VECTOR(FLOAT, 768),  -- e5-base-v2 embedding dimension
+    CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- Clinical sessions
+CREATE TABLE IF NOT EXISTS CLINICAL_SESSIONS (
+    SESSION_ID VARCHAR PRIMARY KEY,
+    PATIENT_ID VARCHAR,
+    PROVIDER_ID VARCHAR,
+    START_TIME TIMESTAMP,
+    END_TIME TIMESTAMP,
+    TRANSCRIPT TEXT,
+    SOAP_NOTE TEXT,
+    SAFETY_ALERTS TEXT,
+    BILLING_INFO TEXT,
+    CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- Grant Cortex access
+GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE PUBLIC;
+
+-- Insert demo patient
+INSERT INTO PATIENT_DATA (PATIENT_ID, NAME, DATE_OF_BIRTH, MEDICAL_HISTORY, RECENT_DIAGNOSES)
+VALUES ('P001', 'Amaan Patel', '1985-03-15', 'Hypertension,Generalized Anxiety Disorder', 'Migraine without aura');
+
+INSERT INTO PATIENT_MEDICATIONS (PATIENT_ID, MEDICATION_NAME, DOSAGE, FREQUENCY, DRUG_CLASS)
+VALUES
+    ('P001', 'Sertraline', '100mg', 'Once daily', 'SSRI'),
+    ('P001', 'Lisinopril', '10mg', 'Once daily', 'ACE Inhibitor');
+
+INSERT INTO PATIENT_ALLERGIES (PATIENT_ID, ALLERGEN, SEVERITY)
+VALUES
+    ('P001', 'Penicillin', 'Severe'),
+    ('P001', 'Sulfa drugs', 'Moderate');
+"""
