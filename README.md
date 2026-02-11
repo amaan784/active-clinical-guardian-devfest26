@@ -228,6 +228,9 @@ Go inside the `backend/tests` folder and run the tests — they contain individu
 - [K2 Think V2 on HuggingFace](https://huggingface.co/LLM360/K2-Think-V2)
 - [IFM.ai - Institute of Foundation Models](https://ifm.ai/)
 - [MBZUAI K2 Think Announcement](https://mbzuai.ac.ae/news/k2-think-v2-a-fully-sovereign-reasoning-model/)
+- https://elevenlabs.io/docs/overview/intro
+- [https://docs.flowglad.com/quickstart#installation-%26-setup](https://docs.flowglad.com/api-reference/invoices/list-invoices)
+- https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-search/cortex-search-overview
 
 ## License
 
