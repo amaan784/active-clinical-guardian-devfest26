@@ -10,7 +10,7 @@ Hackathon link: -
 # Team Members-
 - Amaan Sheikh
 - Sreeram
-- 
+
 ## Architecture
 
 ```
