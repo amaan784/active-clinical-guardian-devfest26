@@ -3,7 +3,9 @@
 Real-time clinical safety monitoring system that listens to doctor-patient encounters, validates drug safety using AI reasoning, and interrupts via voice when dangerous conditions are detected.
 
 This project was built during Columbia Devfest 2026 hackathon. 
-Hackathon link: https://devfest-2026.devpost.com/
+Hackathon link: -
+- https://devfest-2026.devpost.com/
+- https://devpost.com/software/the-active-clinical-guardian
 
 # Team Members-
 - Amaan Sheikh
